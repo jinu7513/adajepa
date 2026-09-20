@@ -90,6 +90,31 @@ python plan.py --config-name adajepa_plan_gd_diversemaze.yaml \
 
 CEM planning uses `--config-name adajepa_plan_cem_<env>.yaml` with the same arguments.
 
+### Weights & Biases benchmark curves
+
+When W&B logging is enabled, evaluation runs log a paper-ready cumulative success
+curve under `paper/success_rate_pct`, with `paper/mpc_step` as its step metric.
+Unlike the low-level MPC logs, this curve is aggregated over all evaluation
+episodes for both frozen and AdaJEPA runs. The run config and default run name
+also include `condition`, `method`, `planner_type`, and `seed`; these labels are
+inferred from the corruption and planner overrides.
+
+Use a common project to compare the full visual-shift matrix:
+
+```bash
+python plan.py --config-name adajepa_plan_gd_pushobj.yaml \
+    model_name=pusht_visual_shift \
+    eval_data_path=$REPO/data/pushobj_eval/val_T/plan_targets.pkl \
+    ood_corruption=blur planner.max_iter=30 \
+    +wandb_logging=true +wandb_project=adajepa_pusht_visual_shift
+```
+
+Optional `+condition=...`, `+method=...`, `+planner_type=...`,
+`+wandb_group=...`, `+wandb_run_name=...`, `+wandb_entity=...`, and
+`+wandb_tags='[...]'` overrides are supported when custom labels or W&B routing
+are needed. In W&B, plot `paper/success_rate_pct` against `paper/mpc_step`, group
+by `condition` and `method`, and split panels by `planner_type`.
+
 The multi-layout maze setting follows [PLDM](https://arxiv.org/abs/2502.14819): the world model is trained on a set of maze layouts and evaluated on held-out ones. To generate the full dataset, follow the [PLDM codebase](https://github.com/vladisai/PLDM) (`pldm_envs/diverse_maze`).
 
 ### Visualization

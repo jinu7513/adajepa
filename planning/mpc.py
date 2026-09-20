@@ -144,6 +144,16 @@ class MPCPlanner(BasePlanner):
             logs.update({"step": self.iter + 1, **(extra_logs or {})})
             self.wandb_run.log(logs)
             self.dump_logs(logs)
+            # Standard MPC evaluates the full batch together, so this is already
+            # the benchmark-wide cumulative success curve. AdaJEPA uses per-sample
+            # subplans (non-empty suffix) and logs its aggregate after all samples.
+            if not self.plan_suffix:
+                paper_logs = {
+                    "paper/mpc_step": self.iter + 1,
+                    "paper/success_rate_pct": 100.0 * float(logs[f"{self.logging_prefix}/success_rate"]),
+                }
+                self.wandb_run.log(paper_logs)
+                self.dump_logs(paper_logs)
 
             # update evaluator's init conditions with new env feedback
             e_final_obs = slice_trajdict_with_t(e_obses, start_idx=-1)

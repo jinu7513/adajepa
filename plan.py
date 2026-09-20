@@ -53,6 +53,41 @@ POINT_MAZE_QVEL_RANGE = np.array(
     [[-5.2262554, 5.2262554], [-5.2262554, 5.2262554]], dtype=np.float32
 )
 
+
+def _benchmark_metadata(cfg_dict):
+    """Derive stable W&B labels for paper-style evaluation dashboards."""
+    condition = cfg_dict.get("condition")
+    if not condition:
+        corruption = cfg_dict.get("ood_corruption")
+        if corruption and corruption != "none":
+            condition = corruption
+        else:
+            env_overrides = cfg_dict.get("env_kwargs_override") or {}
+            if env_overrides.get("agent_color"):
+                condition = "redAgent"
+            elif env_overrides.get("color"):
+                condition = "redBlock"
+            elif env_overrides.get("goal_color"):
+                condition = "redAnchor"
+            else:
+                condition = "default"
+
+    planner_cfg = cfg_dict.get("planner") or {}
+    planner_target = str(planner_cfg.get("_target_", ""))
+    method = cfg_dict.get("method") or (
+        "adajepa" if planner_target.endswith("AdaJEPAMPCPlanner") else "frozen"
+    )
+    subplanner_target = str((planner_cfg.get("sub_planner") or {}).get("target", ""))
+    planner_type = cfg_dict.get("planner_type") or (
+        "cem" if subplanner_target.endswith("CEMPlanner") else "gd"
+    )
+    return {
+        "condition": str(condition),
+        "method": str(method),
+        "planner_type": str(planner_type),
+        "seed": int(cfg_dict["seed"]),
+    }
+
 def planning_main_in_dir(working_dir, cfg_dict):
     os.chdir(working_dir)
     return planning_main(cfg_dict=cfg_dict)
@@ -626,11 +661,28 @@ def planning_main(cfg_dict):
 
     output_dir = cfg_dict["saved_folder"]
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    benchmark = _benchmark_metadata(cfg_dict)
     if cfg_dict["wandb_logging"]:
+        wandb_config = dict(cfg_dict)
+        wandb_config.update(benchmark)
         wandb_run = wandb.init(
-            project=f"plan_{cfg_dict['planner']['name']}", config=cfg_dict
+            project=cfg_dict.get(
+                "wandb_project", f"plan_{cfg_dict['planner']['name']}"
+            ),
+            entity=cfg_dict.get("wandb_entity"),
+            group=cfg_dict.get("wandb_group"),
+            tags=cfg_dict.get("wandb_tags"),
+            config=wandb_config,
         )
-        wandb.run.name = "{}".format(output_dir.split("plan_outputs/")[-1])
+        default_run_name = (
+            f"{benchmark['condition']}-{benchmark['method']}-"
+            f"{benchmark['planner_type']}-seed{benchmark['seed']}"
+        )
+        wandb_run.name = cfg_dict.get("wandb_run_name", default_run_name)
+        wandb_run.define_metric("paper/mpc_step")
+        wandb_run.define_metric(
+            "paper/success_rate_pct", step_metric="paper/mpc_step"
+        )
     else:
         wandb_run = None
 

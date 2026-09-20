@@ -225,7 +225,14 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             n_success = sum(
                 1 for i in range(n_evals) if success_step.get(i, np.inf) <= step
             )
-            self.dump_logs({"mpc/success_rate": n_success / n_evals, "step": step})
+            success_rate = n_success / n_evals
+            self.dump_logs({"mpc/success_rate": success_rate, "step": step})
+            paper_logs = {
+                "paper/mpc_step": step,
+                "paper/success_rate_pct": 100.0 * success_rate,
+            }
+            self.wandb_run.log(paper_logs)
+            self.dump_logs(paper_logs)
 
 
 class _EnvWorkerProxy:
