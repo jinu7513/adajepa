@@ -35,7 +35,17 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             last_layer_only=adapt.get("last_layer_only", True),
             encoder_lr=adapt.get("encoder_lr", None),
             encoder_last_layer_only=adapt.get("encoder_last_layer_only", True),
+            encoder_adapt_mode=adapt.get("encoder_adapt_mode", None),
+            multi_step_adaptation=adapt.get("multi_step_adaptation", False),
+            adapt_horizons=adapt.get("adapt_horizons", None),
+            horizon_weights=adapt.get("horizon_weights", None),
         )
+        wandb_config = getattr(self.wandb_run, "config", None)
+        if hasattr(wandb_config, "update"):
+            wandb_config.update(
+                {"adapt_runtime": self.adajepa_trainer.configuration},
+                allow_val_change=True,
+            )
         self._adajepa_loss_records = []
         self._records = []
         self._sample_idx = 0
@@ -147,8 +157,12 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             _cuda_sync()
             rec["t_adajepa_s"] = time.perf_counter() - t0
             rec["adajepa/pred_loss"] = pred_loss
+            rec.update(self.adajepa_trainer.last_metrics)
             self._record_adajepa_losses(self._sample_idx, self.iter + 1, step_losses)
-            extra_logs = {"adajepa/pred_loss": pred_loss}
+            extra_logs = {
+                "adajepa/pred_loss": pred_loss,
+                **self.adajepa_trainer.last_metrics,
+            }
         self._records.append(rec)
         return extra_logs
 
