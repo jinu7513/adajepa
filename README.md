@@ -47,9 +47,66 @@ Download the released [checkpoints and data](https://drive.google.com/drive/fold
 
 ## Evaluation
 
-The default adaptation setting (used in the paper): one gradient step per MPC iteration on the predictor's last transformer layer and the encoder's head, with learning rates `adapt.lr=5e-4` / `adapt.encoder_lr=1e-5` and a `recent5` replay buffer of executed segments. Each evaluation sample adapts independently from the pretrained weights. All knobs live under the `planner.adapt` block of the config: `adapt.{lr,steps,optimizer,finetune_every,replay_buffer,finetune_encoder,encoder_lr,last_layer_only,encoder_last_layer_only}`. These defaults are a good starting point, but you may want to tune them to your setting (e.g. a larger test-time shift may need a larger lr and/or more steps).
+The default adaptation setting (used in the paper): one gradient step per MPC iteration on the predictor's last transformer layer and the encoder's head, with learning rates `adapt.lr=5e-4` / `adapt.encoder_lr=1e-5` and a `recent5` replay buffer of executed segments. Each evaluation sample adapts independently from the pretrained weights. All knobs live under the `planner.adapt` block of the config, including optimizer/update settings, `encoder_adapt_mode`, `multi_step_adaptation`, `adapt_horizons`, and `horizon_weights`. These defaults are a good starting point, but you may want to tune them to your setting (e.g. a larger test-time shift may need a larger lr and/or more steps).
 
 For the frozen baseline, use `planner._target_=planning.mpc.MPCPlanner '~planner.adapt'`, which skips adaptation and plans all samples in one batch (setting `planner.adapt.lr=0 planner.adapt.steps=0` is equivalent but slower).
+
+### Selective encoder and multi-step adaptation
+
+Online adaptation exposes two independent experimental axes under
+`planner.adapt`:
+
+- `encoder_adapt_mode`: `freeze_all`, `last_block`, `last_2_blocks`, or
+  `full_encoder`.
+- `multi_step_adaptation`: `false` keeps the original sliding-window one-step
+  loss exactly; `true` recursively rolls the existing predictor to the requested
+  `adapt_horizons` and combines their latent MSE losses with `horizon_weights`.
+
+For the released scratch ResNet encoder, parameter-bearing top-level modules are
+ordered as `rb1`, `rb2`, `rb3`, `rb4`, `rb5`, `projection`. Thus `last_block`
+selects `projection`, preserving the released AdaJEPA baseline, and
+`last_2_blocks` selects `rb5` plus `projection`. Selection is performed from the
+encoder's actual parameter-bearing child modules rather than a hard-coded block
+name list. For pretrained encoders with a `base_model`, selective modes exclude
+that backbone; `full_encoder` is the explicit option that includes it.
+
+Example Hydra overrides:
+
+```bash
+# Released baseline: last encoder block, original one-step loss
+planner.adapt.encoder_adapt_mode=last_block \
+planner.adapt.multi_step_adaptation=false
+
+# Last encoder block, recursive multi-step loss
+planner.adapt.encoder_adapt_mode=last_block \
+planner.adapt.multi_step_adaptation=true \
+'planner.adapt.adapt_horizons=[1,2,4]' \
+'planner.adapt.horizon_weights=[1.0,0.5,0.25]'
+
+# Final two encoder blocks, recursive multi-step loss
+planner.adapt.encoder_adapt_mode=last_2_blocks \
+planner.adapt.multi_step_adaptation=true \
+'planner.adapt.adapt_horizons=[1,2,4]' \
+'planner.adapt.horizon_weights=[1.0,0.5,0.25]'
+
+# Predictor-only one-step adaptation
+planner.adapt.encoder_adapt_mode=freeze_all \
+planner.adapt.multi_step_adaptation=false
+
+# Full-encoder recursive multi-step adaptation
+planner.adapt.encoder_adapt_mode=full_encoder \
+planner.adapt.multi_step_adaptation=true \
+'planner.adapt.adapt_horizons=[1,2,4]' \
+'planner.adapt.horizon_weights=[1.0,0.5,0.25]'
+```
+
+Runtime logs include total/trainable encoder parameter counts, the selected
+module names, total adaptation loss, available per-horizon losses, and encoder
+and predictor gradient norms. A requested horizon that is unavailable early in
+an episode is skipped with an explicit warning; if no configured horizon is
+available, adaptation raises a clear error. These per-horizon values are online
+adaptation losses; the repository does not currently have a separate held-out
+1/4/8-step rollout-error evaluator.
 
 Run from the repo root:
 

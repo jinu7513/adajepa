@@ -58,6 +58,10 @@ planner:
     encoder_lr: 1e-5               # separate encoder LR (defaults to lr if null)
     last_layer_only: true          # predictor's last transformer layer only
     encoder_last_layer_only: true  # encoder's last submodule only
+    encoder_adapt_mode: last_block # freeze_all | last_block | last_2_blocks | full_encoder
+    multi_step_adaptation: false   # false exactly preserves the one-step objective
+    adapt_horizons: [1, 2, 4]
+    horizon_weights: [1.0, 0.5, 0.25]
   reuse_actions: true              # warm-start from unexecuted actions of previous replan
 
   sub_planner:
