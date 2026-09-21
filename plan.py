@@ -827,7 +827,17 @@ def main(cfg: OmegaConf):
         log.info(f"Planning result saved dir: {cfg['saved_folder']}")
     cfg_dict = cfg_to_dict(cfg)
     cfg_dict["wandb_logging"] = bool(cfg_dict.get("wandb_logging", True))
-    planning_main(cfg_dict)
+    try:
+        planning_main(cfg_dict)
+    except BaseException:
+        # Explicitly flush pending history on cluster jobs and preserve a failed
+        # run state. Relying only on W&B's atexit hook is fragile with workers.
+        if wandb.run is not None:
+            wandb.finish(exit_code=1)
+        raise
+    else:
+        if wandb.run is not None:
+            wandb.finish(exit_code=0)
 
 
 if __name__ == "__main__":
