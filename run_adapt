@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./run_adapt CONDITION ENCODER_MODE MULTISTEP METHOD [HYDRA_OVERRIDE ...]
+
+Arguments:
+  CONDITION      default | blur | dark | snp1 | snp5 | redAgent | redBlock | redAnchor
+  ENCODER_MODE   freeze_all | last_block | last_2_blocks | full_encoder
+  MULTISTEP      true | false
+  METHOD         W&B method/run label, for example lastblock-ms124
+
+Examples:
+  ./run_adapt default last_block false paper-lastblock-1step
+  ./run_adapt default last_block true lastblock-ms124
+  ./run_adapt blur last_block true lastblock-ms124
+  ./run_adapt redBlock last_block true lastblock-ms124
+
+Optional environment variables:
+  SEED=100
+  N_EVALS=50
+  MAX_MPC_STEPS=30
+  WANDB_PROJECT=adajepa_pusht_robust_adaptation
+  WANDB_LOGGING=true
+  DRY_RUN=1                 Print the command without executing it.
+EOF
+}
+
+if [[ $# -lt 4 ]]; then
+    usage >&2
+    exit 2
+fi
+
+condition="$1"
+encoder_mode="$2"
+multistep="$3"
+method="$4"
+shift 4
+
+case "$encoder_mode" in
+    freeze_all|last_block|last_2_blocks|full_encoder) ;;
+    *)
+        echo "Unknown encoder mode: $encoder_mode" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+case "$multistep" in
+    true|false) ;;
+    *)
+        echo "MULTISTEP must be true or false; got: $multistep" >&2
+        exit 2
+        ;;
+esac
+
+declare -a shift_args
+case "$condition" in
+    default)
+        shift_args=(ood_corruption=null)
+        ;;
+    blur|dark|snp1|snp5)
+        shift_args=("ood_corruption=$condition")
+        ;;
+    redAgent)
+        shift_args=(ood_corruption=null "++env_kwargs_override.agent_color=Red")
+        ;;
+    redBlock)
+        shift_args=(ood_corruption=null "++env_kwargs_override.color=Red")
+        ;;
+    redAnchor)
+        shift_args=(ood_corruption=null "++env_kwargs_override.goal_color=Red")
+        ;;
+    *)
+        echo "Unknown condition: $condition" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo="$script_dir"
+seed_value="${SEED:-100}"
+n_evals_value="${N_EVALS:-50}"
+max_mpc_steps_value="${MAX_MPC_STEPS:-30}"
+wandb_project_value="${WANDB_PROJECT:-adajepa_pusht_robust_adaptation}"
+wandb_logging_value="${WANDB_LOGGING:-true}"
+planner_type="gd"
+run_name="${condition}-${method}-${planner_type}-seed${seed_value}"
+run_dir="$repo/eval_outputs/pusht_robust/$condition/$method/$planner_type/seed$seed_value"
+
+checkpoint_dir="$repo/checkpoints/pusht_visual_shift"
+target_file="$repo/data/pushobj_eval/val_T/plan_targets.pkl"
+
+declare -a command=(
+    python plan.py
+    --config-name adajepa_plan_gd_pushobj.yaml
+    model_name=pusht_visual_shift
+    "ckpt_base_path=$checkpoint_dir"
+    "eval_data_path=$target_file"
+    "${shift_args[@]}"
+    "seed=$seed_value"
+    "n_evals=$n_evals_value"
+    "planner.max_iter=$max_mpc_steps_value"
+    "planner.adapt.encoder_adapt_mode=$encoder_mode"
+    "planner.adapt.multi_step_adaptation=$multistep"
+    'planner.adapt.adapt_horizons=[1,2,4]'
+    'planner.adapt.horizon_weights=[1.0,0.5,0.25]'
+    "+condition=$condition"
+    "+method=$method"
+    "+planner_type=$planner_type"
+    "+wandb_logging=$wandb_logging_value"
+    "+wandb_project=$wandb_project_value"
+    "+wandb_group=${condition}-${planner_type}-seed${seed_value}"
+    "+wandb_run_name=$run_name"
+    "hydra.run.dir=$run_dir"
+    "$@"
+)
+
+echo "condition=$condition"
+echo "encoder_mode=$encoder_mode"
+echo "multistep=$multistep"
+echo "method=$method"
+echo "wandb_run_name=$run_name"
+echo "output_dir=$run_dir"
+
+cd "$repo"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    printf '%q ' "${command[@]}"
+    printf '\n'
+    exit 0
+fi
+
+if [[ ! -f "$checkpoint_dir/hydra.yaml" ]]; then
+    echo "Checkpoint config not found: $checkpoint_dir/hydra.yaml" >&2
+    exit 1
+fi
+if [[ ! -f "$checkpoint_dir/checkpoints/model_latest.pth" ]]; then
+    echo "Checkpoint not found: $checkpoint_dir/checkpoints/model_latest.pth" >&2
+    exit 1
+fi
+if [[ ! -f "$target_file" ]]; then
+    echo "Evaluation targets not found: $target_file" >&2
+    exit 1
+fi
+
+exec "${command[@]}"

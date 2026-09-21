@@ -110,6 +110,24 @@ adaptation losses; the repository does not currently have a separate held-out
 
 Run from the repo root:
 
+For repeatable PushT adaptation runs, the repository includes a wrapper that
+validates the condition and adaptation mode, uses absolute checkpoint/data
+paths, and assigns consistent W&B metadata and output directories:
+
+```bash
+./run_adapt default last_block false paper-lastblock-1step
+./run_adapt default last_block true lastblock-ms124
+./run_adapt blur last_block true lastblock-ms124
+./run_adapt redBlock last_block true lastblock-ms124
+```
+
+Its arguments are `CONDITION ENCODER_MODE MULTISTEP METHOD`. Conditions include
+`default`, `blur`, `dark`, `snp1`, `snp5`, `redAgent`, `redBlock`, and
+`redAnchor`; encoder modes include `freeze_all`, `last_block`,
+`last_2_blocks`, and `full_encoder`. The defaults are `SEED=100`, `N_EVALS=50`,
+and `MAX_MPC_STEPS=30`; these can be overridden as environment variables. Use
+`DRY_RUN=1` to inspect the generated command without launching an evaluation.
+
 ```bash
 REPO=$(pwd)
 
