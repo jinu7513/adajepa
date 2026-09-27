@@ -1,5 +1,10 @@
 __pycache__
 *.pyc
+.venv-tracka/
+.uv-cache/
+.pytest_cache/
+/tmp/pdfs/
+/output/pdf/*.log
 figures
 *outputs*
 data

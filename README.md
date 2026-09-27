@@ -16,6 +16,7 @@
 2. [AdaJEPA](#adajepa)
 3. [Released Checkpoints and Eval Data](#released-checkpoints-and-eval-data)
 4. [Evaluation](#evaluation)
+5. [Track A: scratch robust visual encoder](#track-a-scratch-robust-visual-encoder)
 
 ## Installation
 
@@ -104,6 +105,7 @@ Use a common project to compare the full visual-shift matrix:
 ```bash
 python plan.py --config-name adajepa_plan_gd_pushobj.yaml \
     model_name=pusht_visual_shift \
+    ckpt_base_path=$REPO/checkpoints/pusht_visual_shift \
     eval_data_path=$REPO/data/pushobj_eval/val_T/plan_targets.pkl \
     ood_corruption=blur planner.max_iter=30 \
     +wandb_logging=true +wandb_project=adajepa_pusht_visual_shift
@@ -130,6 +132,111 @@ The shape and maze checkpoints ship the VQVAE decoder that was co-trained with t
 <p align="center">
   <i>Planning with an unseen I shape: AdaJEPA (left, red) reaches the goal; the frozen one (right, blue) does not.</i>
 </p>
+
+## Track A: Scratch Robust Visual Encoder
+
+Track A is a separate **representation-learning experiment**, not a modification of
+AdaJEPA's MPC planner or its test-time adaptation algorithm. It trains a PushT visual
+encoder from random initialization with masked reconstruction, same-state color
+rerendering, and corruption-to-clean reconstruction. A shared decoder receives target
+object colors so that it can reconstruct appearance without requiring the encoder to
+retain source color. The research question is whether the resulting frozen features
+retain scene geometry under color and corruption shifts.
+
+The current implementation includes dataset generation, four selectable training
+objectives, frozen linear probes, visual-shift evaluation, W&B/local logging, resume,
+and cross-run aggregation. It has passed local smoke tests; **the full multi-seed
+benchmark has not been run, and no MPC success improvement has been established**.
+Matching the old DINO encoder's token dimensions does not make the new features
+compatible with an existing world-model checkpoint. The Track A probe figure is a
+representation-error comparison, **not** the paper's Success Rate vs MPC Step curve.
+
+| Objective (`training.objective`) | Optimizer update |
+| --- | --- |
+| `clean_mae` | Masked reconstruction of the clean image |
+| `render_only` | Clean/color-view translation plus visible-token alignment |
+| `corruption_only` | Corrupted-input to clean-target reconstruction plus alignment |
+| `robust_alternating` | Alternates render and corruption updates with one shared decoder |
+
+### Quick start on CIRCE
+
+Run these Bash commands from the repository root in the existing `ts` environment.
+`SOURCE` must be an actual PushT training dataset directory containing
+`train/states.pth` and `train/seq_lengths.pkl` (and `velocities.pth` if the source
+requires it). The planning file `data/pushobj_eval/val_T/plan_targets.pkl` is **not**
+the source for this encoder experiment. First generate preview contact sheets and
+review the color/corruption ranges and reset rejection report:
+
+```bash
+SOURCE=/absolute/path/to/pushT_dataset
+PAIRS="$PWD/data/tracka_pairs"
+
+python generate_pusht_pairs.py --config-name tracka \
+  dataset.source_path="$SOURCE" dataset.output_path="$PAIRS" \
+  generation.preview_only=true
+
+# Only after reviewing the preview images and generation_report.json:
+python generate_pusht_pairs.py --config-name tracka \
+  dataset.source_path="$SOURCE" dataset.output_path="$PAIRS" \
+  generation.preview_only=false generation.ranges_reviewed=true
+```
+
+The first run to check the pipeline should be a two-update smoke test, not a full
+training job. W&B defaults to the `adajepa_trackA` project; use
+`logging.mode=offline` if CIRCE cannot reach W&B. Training curves use
+`train/global_step`, not `paper/mpc_step`.
+
+```bash
+python train_encoder.py --config-name tracka \
+  dataset.output_path="$PAIRS" training.objective=robust_alternating \
+  training.total_optimizer_updates=2 training.batch_size=2 logging.log_every=1
+```
+
+After the smoke test, use a fixed dataset and compare the four objectives under the
+same configured update budget and training seeds. The following is a **proposed
+12-run experiment**, not one already performed; submit jobs in accordance with the
+cluster's resource policy:
+
+```bash
+for SEED in 0 1 2; do
+  for MODE in clean_mae render_only corruption_only robust_alternating; do
+    python train_encoder.py --config-name tracka \
+      dataset.output_path="$PAIRS" training.objective="$MODE" \
+      training.seed="$SEED" logging.group="trackA-seed${SEED}"
+  done
+done
+```
+
+Evaluate each run's printed `checkpoint_latest.pt` using a probe trained only on
+clean training features, with its regularization selected on clean validation data.
+The encoder and selected probe stay frozen across default, red-object, blur, and
+other test conditions. The probe script also writes W&B charts and local CSV/JSON:
+
+```bash
+python eval_encoder_probes.py --config-name tracka \
+  dataset.output_path="$PAIRS" evaluation.encoder=checkpoint \
+  evaluation.checkpoint=/absolute/path/to/run/checkpoint_latest.pt
+
+# After evaluating the selected objective/seed checkpoints:
+python aggregate_tracka_results.py \
+  /absolute/path/to/probe_run_1 /absolute/path/to/probe_run_2 \
+  --output-dir "$PWD/tracka_outputs/comparison"
+```
+
+The aggregator rejects incompatible dataset/evaluation protocols and reports means
+and sample standard deviations across distinct training seeds; it does not compute
+confidence intervals. For random-scratch and frozen-DINO references, resume/recovery,
+color and corruption ranges, metric definitions, and exact configuration keys, see
+the [complete Track A guide](docs/tracka.md) and [configuration](conf/tracka.yaml).
+
+The algorithm, equations, hypotheses, experimental controls, and limitations are
+documented in standalone [English](docs/overleaf/tracka_en.tex) and
+[Korean](docs/overleaf/tracka_ko.tex) LaTeX sources. To read them immediately, use
+the compiled [English PDF](output/pdf/tracka_en.pdf) or
+[Korean PDF](output/pdf/tracka_ko.pdf). For Overleaf, upload the
+[source ZIP](docs/overleaf/tracka_overleaf.zip), choose **XeLaTeX**, and set the
+desired language file as the **Main document**; see the
+[Overleaf instructions](docs/overleaf/README.md).
 
 ## Acknowledgement
 

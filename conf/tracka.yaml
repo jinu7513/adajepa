@@ -1,0 +1,123 @@
+defaults:
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: tracka_outputs/hydra/${now:%Y%m%d_%H%M%S}
+
+model:
+  image_size: 224
+  patch_size: 16
+  embed_dim: 384
+  depth: 6
+  heads: 6
+  use_cls: false
+mask:
+  ratio: 0.5
+decoder:
+  dim: 192
+  depth: 2
+  heads: 6
+  conditioning: additive
+  rgb_embed_dim: 64
+  use_type_embedding: true
+  use_cls_global_decoder: false
+loss:
+  norm_pix_loss: false
+  lambda_render_inv: 1.0
+  lambda_corr_inv: 1.0
+  lambda_cls_global: 0.0
+
+dataset:
+  schema_version: tracka-four-view-v1
+  source_path: null  # Set explicitly; must contain the selected source split directories.
+  source_splits: [train]
+  output_path: data/tracka_pairs
+  trajectory_ids: null
+  frame_stride: 5
+  max_states_per_trajectory: null
+  max_total_states: null
+  state_sampling_seed: 21
+  trajectory_split: [0.7, 0.15, 0.15]
+  split_seed: 42
+  dataset_seed: 17
+  nuisance_assignment_seed: 23
+  corruption_seed: 29
+  corruption_types: [gaussian, salt_pepper, blur]
+  color_sampling:
+    color_space: hsv
+    hue_range: [0.0, 1.0]
+    saturation_range: [0.45, 0.9]
+    value_range: [0.4, 0.85]
+    distance_metric: rgb_l2
+    min_background_distance: 0.4
+    min_inter_object_distance: 0.3
+    min_inter_view_distance: 0.15
+    max_attempts: 10000
+  corruption:
+    gaussian_strength_range: [1.0, 8.0]
+    salt_pepper_strength_range: [0.001, 0.02]
+    blur_strength_range: [0.3, 1.2]
+  reset_tolerances:
+    # One 0.01s reset physics step can move the agent. Log rejections by field.
+    source:
+      agent_position: 5.0
+      block_position: 5.0
+      angle: 0.1
+      agent_velocity: 0.001
+    canonical:
+      agent_position: 0.0001
+      block_position: 0.0001
+      angle: 0.0001
+      agent_velocity: 0.0001
+
+generation:
+  preview_only: true
+  preview_states: 8
+  ranges_reviewed: false
+
+training:
+  objective: clean_mae
+  total_optimizer_updates: 10000
+  equal_render_corruption_schedule: true
+  seed: 0
+  batch_size: 16
+  lr: 0.0001
+  weight_decay: 0.05
+  device: auto
+  cpu_threads: 4
+  grad_clip: 1.0
+  validate_every: 100
+  validation_batches: 4
+  save_every: 100
+  output_dir: null
+  resume: null
+
+logging:
+  mode: online
+  project: adajepa_trackA
+  entity: null
+  name: null
+  group: null
+  log_every: 10
+  image_every: 100
+  fallback_to_local: true
+
+evaluation:
+  encoder: checkpoint
+  checkpoint: null
+  output_dir: null
+  device: auto
+  batch_size: 32
+  seed: 100
+  ridge_alphas: [0.001, 0.01, 0.1, 1.0, 10.0]
+  max_states_per_split: null
+  corruption_grid:
+    gaussian: [0.0, 4.0, 8.0, 12.0]
+    salt_pepper: [0.0, 0.01, 0.02, 0.04]
+    blur: [0.0, 0.6, 1.2, 2.0]
+  outside_color_sampling:
+    saturation_range: [0.91, 1.0]
+    value_range: [0.86, 0.95]

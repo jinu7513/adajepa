@@ -1,12 +1,27 @@
 """Online image corruption for OOD evaluation.
 
-Supports: blur, snp (salt-and-pepper), dark (brightness reduction).
+Supports: gaussian, salt_pepper, blur; legacy snp1/snp5 and dark are preserved.
 Applied to uint8 HWC numpy arrays, compatible with observation dicts
 from env.rollout().
 """
 
 import numpy as np
 import cv2
+
+
+def apply_gaussian(frame, sigma, rng):
+    """Sigma is in uint8 intensity units; noise is independent per channel."""
+    return np.clip(frame.astype(np.float32) + rng.normal(0, sigma, frame.shape),
+                   0, 255).astype(np.uint8)
+
+
+def apply_canonical_salt_pepper(frame, probability, rng):
+    """One exclusive draw per pixel: total selected fraction has expectation p."""
+    draw = rng.random_sample(frame.shape[:2])
+    out = frame.copy()
+    out[draw < probability / 2] = 255
+    out[(draw >= probability / 2) & (draw < probability)] = 0
+    return out
 
 
 def apply_salt_pepper(frame, density, rng):
@@ -23,6 +38,8 @@ def apply_salt_pepper(frame, density, rng):
 
 def apply_blur(frame, sigma):
     """Gaussian blur with given sigma."""
+    if sigma == 0:
+        return frame.copy()
     k = max(3, int(2 * round(3 * sigma) + 1))
     return cv2.GaussianBlur(frame, (k, k), sigmaX=sigma, sigmaY=sigma)
 
@@ -35,6 +52,8 @@ def apply_dark(frame, factor):
 
 # Registry: name -> (function, default_level)
 CORRUPTIONS = {
+    "gaussian": (apply_gaussian, 5.0),
+    "salt_pepper": (apply_canonical_salt_pepper, 0.01),
     "blur":  (apply_blur, 2.0),
     "snp1":  (apply_salt_pepper, 0.01),
     "snp5":  (apply_salt_pepper, 0.05),
@@ -48,7 +67,7 @@ def corrupt_frames(frames, corruption_name, level=None, seed=0):
     Args:
         frames: np.ndarray, shape (..., H, W, C) uint8.
             Can be (H,W,C), (T,H,W,C), (B,T,H,W,C), etc.
-        corruption_name: one of "blur", "snp1", "snp5", "dark", or None/"none".
+        corruption_name: registry key (canonical or legacy), or None/"none".
         level: override default level. If None, use default.
         seed: RNG seed for stochastic corruptions (snp).
 
@@ -67,6 +86,10 @@ def corrupt_frames(frames, corruption_name, level=None, seed=0):
     func, default_level = CORRUPTIONS[corruption_name]
     if level is None:
         level = default_level
+    if not np.isfinite(level) or level < 0:
+        raise ValueError("Corruption strength must be finite and nonnegative")
+    if corruption_name == "salt_pepper" and level > 1:
+        raise ValueError("salt_pepper strength must lie in [0,1]")
 
     # seed=None -> truly random (system entropy), fresh noise each call.
     # seed=int -> reproducible noise for that seed.
@@ -75,7 +98,7 @@ def corrupt_frames(frames, corruption_name, level=None, seed=0):
     flat = frames.reshape(-1, *frames.shape[-3:])  # (N, H, W, C)
     out = np.empty_like(flat)
     for i in range(flat.shape[0]):
-        if corruption_name.startswith("snp"):
+        if corruption_name.startswith("snp") or corruption_name in ("gaussian", "salt_pepper"):
             out[i] = func(flat[i], level, rng)
         else:
             out[i] = func(flat[i], level)
