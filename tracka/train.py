@@ -12,7 +12,7 @@ from .common import (absolute, file_hash, git_info, load_checkpoint, restore_rng
                      rng_state, seed_all, write_json)
 from .data import FourViewDataset
 from .logging import RunLogger
-from .model import RobustMAE
+from .model import RobustMAE, resolved_mask_ratios
 
 
 def device_for(choice):
@@ -79,9 +79,11 @@ def train(cfg):
     if checkpoint:
         if checkpoint["manifest_sha256"] != manifest_hash:
             raise ValueError("Resume dataset manifest differs")
-        for key in ("model", "decoder", "loss", "mask"):
+        for key in ("model", "decoder", "loss"):
             if checkpoint["config"][key] != cfg[key]:
                 raise ValueError("Resume configuration differs: " + key)
+        if resolved_mask_ratios(checkpoint["config"]["mask"]) != resolved_mask_ratios(cfg["mask"]):
+            raise ValueError("Resume configuration differs: mask")
         for key in ("objective", "batch_size", "seed", "lr", "weight_decay"):
             if checkpoint["config"]["training"][key] != tc[key]:
                 raise ValueError("Resume training configuration differs: " + key)
@@ -111,6 +113,10 @@ def train(cfg):
         raise ValueError("Resume budget must exceed checkpoint global_step")
     out.mkdir(parents=True, exist_ok=True)
     run_name = f"trackA-{objective}-{cfg['decoder']['conditioning']}-mask{cfg['mask']['ratio']*100:g}-seed{tc['seed']}"
+    ratios = resolved_mask_ratios(cfg["mask"])
+    if ratios["render_only"] != ratios["clean_mae"] or ratios["corruption_only"] != ratios["clean_mae"]:
+        run_name = (f"trackA-{objective}-{cfg['decoder']['conditioning']}"
+                    f"-render{ratios['render_only']*100:g}-corr{ratios['corruption_only']*100:g}-seed{tc['seed']}")
     cfg["logging"]["name"] = cfg["logging"]["name"] or run_name
     write_json(out / "config.json", cfg)
     metadata = {"config": cfg, **git_info(), "manifest_sha256": manifest_hash,
@@ -150,7 +156,7 @@ def train(cfg):
             if step % cfg["logging"]["image_every"] == 0 or step == tc["total_optimizer_updates"]:
                 prior = rng_state()
                 model.eval()
-                preview = model.preview({k: v[:1] for k, v in batch.items()})[0]
+                preview = model.preview({k: v[:1] for k, v in batch.items()}, mode=mode)[0]
                 image = ((preview.clamp(-1, 1).permute(1, 2, 0).cpu().numpy() + 1) * 127.5).astype(np.uint8)
                 logger.image(image, step)
                 model.train()

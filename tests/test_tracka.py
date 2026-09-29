@@ -13,7 +13,8 @@ from tracka.common import load_checkpoint
 from tracka.data import (CLEAN_RGB, FourViewDataset, check_state, generate, new_env,
                          render_state, sample_colors, state_errors, validate_dataset, valid_colors)
 from tracka.logging import RunLogger
-from tracka.model import RobustMAE, ScratchEncoder, gather_tokens, patchify, sample_mask, unpatchify
+from tracka.model import (RobustMAE, ScratchEncoder, gather_tokens, patchify,
+                          resolved_mask_ratios, sample_mask, unpatchify)
 from tracka.probes import LinearProbe, evaluate, physical_targets
 from tracka.train import train
 
@@ -93,6 +94,33 @@ def test_mask_restore_and_original_positions(cfg):
     # With no transformer blocks, visible features equal gathering full features.
     enc.blocks = torch.nn.ModuleList([])
     assert torch.allclose(enc.forward_visible(x, keep), gather_tokens(enc(x), keep), atol=1e-6)
+
+
+def test_objective_specific_mask_ratios(cfg, monkeypatch):
+    import tracka.model as model_module
+
+    cfg["mask"].update(render_ratio=.5, corruption_ratio=.25)
+    model = RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
+    batch = random_batch(cfg)
+    observed = []
+    original = model_module.sample_mask
+
+    def record_mask(batch_size, patches, ratio, device, generator=None):
+        observed.append(ratio)
+        return original(batch_size, patches, ratio, device, generator)
+
+    monkeypatch.setattr(model_module, "sample_mask", record_mask)
+    for mode, expected in (("render_only", .5), ("corruption_only", .25), ("clean_mae", .5)):
+        loss, logs = model.objective(batch, mode)
+        assert torch.isfinite(loss)
+        assert observed[-1] == expected
+        assert logs["mask/ratio"].item() == expected
+    model.preview(batch, mode="corruption_only")
+    assert observed[-1] == .25
+    assert resolved_mask_ratios({"ratio": .5}) == resolved_mask_ratios(
+        {"ratio": .5, "render_ratio": None, "corruption_ratio": None})
+    with pytest.raises(ValueError, match="strictly between 0 and 1"):
+        resolved_mask_ratios({"ratio": .5, "corruption_ratio": 0})
 
 
 @pytest.mark.parametrize("conditioning", ["additive", "cross_attention"])
@@ -200,7 +228,13 @@ def test_resume_equivalence(generated, tmp_path):
     cfg = generated
     cfg["training"].update(objective="robust_alternating", output_dir=str(tmp_path / "resumed"))
     out = train(cfg)
-    cfg["training"].update(total_optimizer_updates=4, resume=str(out / "checkpoint_latest.pt"))
+    # An older checkpoint stored only mask.ratio; its effective schedule is unchanged.
+    legacy = load_checkpoint(out / "checkpoint_latest.pt")
+    legacy["config"]["mask"].pop("render_ratio")
+    legacy["config"]["mask"].pop("corruption_ratio")
+    legacy_path = out / "legacy_ratio_only.pt"
+    torch.save(legacy, legacy_path)
+    cfg["training"].update(total_optimizer_updates=4, resume=str(legacy_path))
     train(cfg)
     resumed = load_checkpoint(out / "checkpoint_latest.pt")
     cfg["training"].update(output_dir=str(tmp_path / "uninterrupted"), resume=None)
@@ -208,6 +242,20 @@ def test_resume_equivalence(generated, tmp_path):
     for name in ("encoder", "decoder"):
         for key, value in complete[name].items():
             assert torch.equal(value, resumed[name][key]), key
+
+
+def test_mixed_mask_training_and_resume_guard(generated, tmp_path):
+    cfg = generated
+    cfg["mask"].update(render_ratio=.5, corruption_ratio=.25)
+    cfg["training"].update(objective="robust_alternating", output_dir=str(tmp_path / "mixed"))
+    out = train(cfg)
+    records = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
+    ratios = [record["mask/ratio"] for record in records if "mask/ratio" in record]
+    assert ratios[:2] == [.5, .25]
+    cfg["training"].update(total_optimizer_updates=4, resume=str(out / "checkpoint_latest.pt"))
+    cfg["mask"]["corruption_ratio"] = .5
+    with pytest.raises(ValueError, match="Resume configuration differs: mask"):
+        train(cfg)
 
 
 def test_linear_probe_toy():

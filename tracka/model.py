@@ -35,6 +35,20 @@ def sample_mask(batch, patches, ratio, device, generator=None):
     return order[:, :keep], restore, mask.gather(1, restore)
 
 
+def resolved_mask_ratios(mask):
+    """Resolve optional per-objective ratios, including legacy ratio-only configs."""
+    base = mask["ratio"]
+    render = mask.get("render_ratio")
+    corruption = mask.get("corruption_ratio")
+    ratios = {"clean_mae": base,
+              "render_only": base if render is None else render,
+              "corruption_only": base if corruption is None else corruption}
+    for mode, ratio in ratios.items():
+        if ratio is None or not 0 < ratio < 1:
+            raise ValueError(f"mask ratio for {mode} must be strictly between 0 and 1")
+    return ratios
+
+
 def gather_tokens(tokens, ids):
     return tokens.gather(1, ids.unsqueeze(-1).expand(-1, -1, tokens.shape[-1]))
 
@@ -160,7 +174,8 @@ class RobustMAE(nn.Module):
         super().__init__()
         self.encoder = ScratchEncoder(**model)
         self.decoder = SharedDecoder(self.encoder, **decoder)
-        self.loss_cfg, self.mask_ratio = loss, mask["ratio"]
+        self.loss_cfg = loss
+        self.mask_ratios = resolved_mask_ratios(mask)
 
     def target(self, images):
         target = patchify(images, self.encoder.patch_size)
@@ -170,12 +185,13 @@ class RobustMAE(nn.Module):
         return target
 
     def objective(self, batch, mode, generator=None):
+        if mode not in self.mask_ratios:
+            raise ValueError("Select one update objective")
+        ratio = self.mask_ratios[mode]
         keep, restore, mask = sample_mask(len(batch["clean"]), self.encoder.num_patches,
-                                         self.mask_ratio, batch["clean"].device, generator)
+                                         ratio, batch["clean"].device, generator)
         features = {}
         views = ["clean"] + (["A", "B"] if mode == "render_only" else ["corrupt"] if mode == "corruption_only" else [])
-        if mode not in ("clean_mae", "render_only", "corruption_only"):
-            raise ValueError("Select one update objective")
         for view in views:
             features[view] = self.encoder.forward_features(batch[view], ids_keep=keep,
                                                            return_cls=self.encoder.cls_token is not None)
@@ -193,7 +209,8 @@ class RobustMAE(nn.Module):
 
         z = features["clean"]["patch_tokens"]
         logs = {"latent/norm_clean": z.norm(dim=-1).mean(),
-                "latent/variance_clean": z.mean(1).var(0, unbiased=False).mean()}
+                "latent/variance_clean": z.mean(1).var(0, unbiased=False).mean(),
+                "mask/ratio": z.new_tensor(ratio)}
         if mode == "clean_mae":
             rec, glob = reconstruct("clean", "clean", "eta_clean")
             total = rec
@@ -221,9 +238,11 @@ class RobustMAE(nn.Module):
         return total, logs
 
     @torch.no_grad()
-    def preview(self, batch):
+    def preview(self, batch, mode="render_only"):
+        if mode not in self.mask_ratios:
+            raise ValueError("Select one update objective")
         keep, restore, mask = sample_mask(len(batch["clean"]), self.encoder.num_patches,
-                                         self.mask_ratio, batch["clean"].device)
+                                         self.mask_ratios[mode], batch["clean"].device)
         rows = []
         for view, eta in (("clean", "eta_clean"), ("A", "eta_A"), ("B", "eta_B"), ("corrupt", "eta_clean")):
             image = batch[view]

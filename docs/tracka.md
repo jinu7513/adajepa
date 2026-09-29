@@ -120,6 +120,26 @@ python train_encoder.py --config-name tracka \
   model.use_cls=true decoder.use_cls_global_decoder=true loss.lambda_cls_global=0.1
 ```
 
+Objective-specific masking ablation (one shared encoder, not separate encoders):
+
+```bash
+python train_encoder.py --config-name tracka \
+  dataset.output_path=data/pairs training.objective=robust_alternating \
+  training.total_optimizer_updates=1000 training.batch_size=16 training.seed=0 \
+  model.use_cls=true decoder.use_cls_global_decoder=true loss.lambda_cls_global=0.1 \
+  mask.ratio=0.5 mask.render_ratio=0.5 mask.corruption_ratio=0.25 \
+  logging.name=trackA-cls-render50-corr25-1k-seed0 logging.fallback_to_local=false
+```
+
+`mask.ratio` remains the fallback and the clean-MAE ratio; optional `render_ratio`
+and `corruption_ratio` override their respective update modes. Both ratios must
+remain strictly between 0 and 1 because MAE loss uses masked patches. The offline
+corruption view mixes blur, Gaussian, and salt-pepper; `corruption_ratio` applies to
+all three, not blur alone. Each update logs `mask/ratio` to W&B and local metrics.
+A different mask schedule cannot be resumed from the checkpoint. Probe with the
+same `evaluation.max_states_per_split` and seed as previous runs, using the new
+run's printed checkpoint path.
+
 ## 3. Resume and recover logging
 
 ```bash

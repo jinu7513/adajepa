@@ -186,6 +186,12 @@ training job. W&B defaults to the `adajepa_trackA` project; use
 `logging.mode=offline` if CIRCE cannot reach W&B. Training curves use
 `train/global_step`, not `paper/mpc_step`.
 
+For a masking ablation, `mask.render_ratio=0.5 mask.corruption_ratio=0.25`
+keeps render/color updates at 50% masking and uses 25% for all corruption
+updates (blur, Gaussian, salt-pepper). The default remains `mask.ratio=0.5`
+for both; zero masking is not a valid MAE configuration. See `docs/tracka.md`
+for the matching CLS training command.
+
 ```bash
 python train_encoder.py --config-name tracka \
   dataset.output_path="$PAIRS" training.objective=robust_alternating \

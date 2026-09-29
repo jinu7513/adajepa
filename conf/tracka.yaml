@@ -16,6 +16,8 @@ model:
   use_cls: false
 mask:
   ratio: 0.5
+  render_ratio: null  # Use ratio when unset.
+  corruption_ratio: null  # Use ratio when unset; must stay strictly above zero.
 decoder:
   dim: 192
   depth: 2
