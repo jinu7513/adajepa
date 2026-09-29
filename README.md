@@ -192,6 +192,13 @@ updates (blur, Gaussian, salt-pepper). The default remains `mask.ratio=0.5`
 for both; zero masking is not a valid MAE configuration. See `docs/tracka.md`
 for the matching CLS training command.
 
+An optional label-free variance anti-collapse ablation is available through
+`loss.lambda_variance`, `loss.variance_target_std`, and
+`loss.variance_feature=patch_mean|cls|both` (default weight zero). It regularizes
+unmasked clean-image features and logs its contribution separately; see
+`docs/tracka.md` for the formula and smoke-test command. It does not use PushT
+state labels and is not the full VICReg objective.
+
 ```bash
 python train_encoder.py --config-name tracka \
   dataset.output_path="$PAIRS" training.objective=robust_alternating \

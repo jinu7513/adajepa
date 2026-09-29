@@ -140,6 +140,44 @@ A different mask schedule cannot be resumed from the checkpoint. Probe with the
 same `evaluation.max_states_per_split` and seed as previous runs, using the new
 run's printed checkpoint path.
 
+### Optional label-free variance ablation
+
+The optional `loss.lambda_variance` adds a VICReg-style **variance term only**;
+it is not a full VICReg implementation and does not use state, position, or angle
+labels. It applies a per-feature standard-deviation floor across different clean
+images in a batch:
+
+`L_var = mean_j max(0, variance_target_std - sqrt(Var_batch(z_j) + 1e-4))`.
+
+Here `z` comes from an **unmasked** clean-image encoder pass, using patch-token
+mean, CLS, or both as selected by `loss.variance_feature`. An unmasked pass is
+important: otherwise independently sampled masks could supply between-sample
+variance even if the model ignored the underlying scene. The same loss is added
+on render and corruption updates. It requires training batch size at least two
+and adds one full-image encoder forward pass per update. The default weight is
+zero, so existing training behavior and checkpoints remain compatible.
+
+For a CLS experiment matched to the render50/corruption25 pilot, first run a
+two-update smoke test, then change `training.total_optimizer_updates` to 1000
+for a new, separate run:
+
+```bash
+python train_encoder.py --config-name tracka \
+  dataset.output_path=data/pairs training.objective=robust_alternating \
+  training.total_optimizer_updates=2 training.batch_size=16 training.seed=0 \
+  model.use_cls=true decoder.use_cls_global_decoder=true loss.lambda_cls_global=0.1 \
+  mask.ratio=0.5 mask.render_ratio=0.5 mask.corruption_ratio=0.25 \
+  loss.lambda_variance=0.1 loss.variance_target_std=0.1 loss.variance_feature=both \
+  logging.name=trackA-cls-render50-corr25-var-smoke logging.fallback_to_local=false
+```
+
+The `0.1` standard-deviation floor and `0.1` loss weight are pilot settings, not
+published VICReg defaults. W&B/local metrics report `loss/variance`,
+`loss/weighted_variance`, per-feature variance losses, and unmasked clean feature
+standard deviations. Compare against the zero-weight model with the same dataset,
+seed, masking schedule, update count, and probe settings. A higher feature standard
+deviation alone is not evidence of improved PushT control or robustness.
+
 ## 3. Resume and recover logging
 
 ```bash

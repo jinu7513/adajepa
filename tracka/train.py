@@ -12,7 +12,7 @@ from .common import (absolute, file_hash, git_info, load_checkpoint, restore_rng
                      rng_state, seed_all, write_json)
 from .data import FourViewDataset
 from .logging import RunLogger
-from .model import RobustMAE, resolved_mask_ratios
+from .model import RobustMAE, resolved_mask_ratios, resolved_variance_config
 
 
 def device_for(choice):
@@ -61,6 +61,8 @@ def train(cfg):
         raise ValueError("Unknown training.objective")
     if tc["total_optimizer_updates"] < 1 or tc["batch_size"] < 1:
         raise ValueError("Training update count and batch size must be positive")
+    if cfg["loss"].get("lambda_variance", 0) and tc["batch_size"] < 2:
+        raise ValueError("Variance regularization requires training.batch_size >= 2")
     if objective == "robust_alternating" and (tc["total_optimizer_updates"] % 2 or not tc["equal_render_corruption_schedule"]):
         raise ValueError("robust_alternating requires an even update budget and equal schedule")
     for n in (tc["save_every"], tc["validate_every"], cfg["logging"]["log_every"], cfg["logging"]["image_every"]):
@@ -79,9 +81,11 @@ def train(cfg):
     if checkpoint:
         if checkpoint["manifest_sha256"] != manifest_hash:
             raise ValueError("Resume dataset manifest differs")
-        for key in ("model", "decoder", "loss"):
+        for key in ("model", "decoder"):
             if checkpoint["config"][key] != cfg[key]:
                 raise ValueError("Resume configuration differs: " + key)
+        if resolved_variance_config(checkpoint["config"]["loss"]) != resolved_variance_config(cfg["loss"]):
+            raise ValueError("Resume configuration differs: loss")
         if resolved_mask_ratios(checkpoint["config"]["mask"]) != resolved_mask_ratios(cfg["mask"]):
             raise ValueError("Resume configuration differs: mask")
         for key in ("objective", "batch_size", "seed", "lr", "weight_decay"):

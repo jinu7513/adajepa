@@ -1,4 +1,6 @@
 """Spatial bidirectional ViT and shared nuisance-conditioned MAE decoder."""
+import math
+
 import torch
 from torch import nn
 
@@ -47,6 +49,33 @@ def resolved_mask_ratios(mask):
         if ratio is None or not 0 < ratio < 1:
             raise ValueError(f"mask ratio for {mode} must be strictly between 0 and 1")
     return ratios
+
+
+def resolved_variance_config(loss):
+    """Fill defaults for checkpoints saved before variance regularization existed."""
+    config = dict(loss)
+    config.setdefault("lambda_variance", 0.0)
+    config.setdefault("variance_target_std", 0.1)
+    config.setdefault("variance_feature", "patch_mean")
+    if not math.isfinite(config["lambda_variance"]) or config["lambda_variance"] < 0:
+        raise ValueError("loss.lambda_variance must be finite and nonnegative")
+    if not math.isfinite(config["variance_target_std"]) or config["variance_target_std"] <= 0:
+        raise ValueError("loss.variance_target_std must be finite and positive")
+    if config["variance_feature"] not in ("patch_mean", "cls", "both"):
+        raise ValueError("loss.variance_feature must be patch_mean, cls, or both")
+    return config
+
+
+def variance_hinge(features, target_std):
+    """VICReg-style per-dimension standard-deviation floor across distinct images."""
+    if features.ndim != 2:
+        raise ValueError("Variance regularization expects one vector per image")
+    if features.size(0) < 2:
+        # A short final validation batch cannot estimate between-image variance.
+        zero = features.sum() * 0
+        return zero, zero
+    std = (features.float().var(dim=0, unbiased=False) + 1e-4).sqrt()
+    return torch.relu(target_std - std).mean(), std.mean()
 
 
 def gather_tokens(tokens, ids):
@@ -174,8 +203,11 @@ class RobustMAE(nn.Module):
         super().__init__()
         self.encoder = ScratchEncoder(**model)
         self.decoder = SharedDecoder(self.encoder, **decoder)
-        self.loss_cfg = loss
+        self.loss_cfg = resolved_variance_config(loss)
         self.mask_ratios = resolved_mask_ratios(mask)
+        if self.loss_cfg["lambda_variance"] and self.loss_cfg["variance_feature"] in ("cls", "both"):
+            if self.encoder.cls_token is None:
+                raise ValueError("CLS variance regularization requires model.use_cls=true")
 
     def target(self, images):
         target = patchify(images, self.encoder.patch_size)
@@ -234,6 +266,28 @@ class RobustMAE(nn.Module):
                          "latent/" + prefix + "_distance": inv.sqrt(),
                          "latent/norm_" + prefix: torch.stack([v.norm(dim=-1).mean() for v in shifted]).mean()})
         total = total + self.loss_cfg["lambda_cls_global"] * glob
+        if self.loss_cfg["lambda_variance"]:
+            # The training mask is sampled independently for each image. Regularize
+            # full-image features so mask-pattern variation cannot satisfy this term.
+            full = self.encoder.forward_features(
+                batch["clean"], return_cls=self.encoder.cls_token is not None)
+            terms = []
+            if self.loss_cfg["variance_feature"] in ("patch_mean", "both"):
+                value, std = variance_hinge(
+                    full["patch_tokens"].mean(1), self.loss_cfg["variance_target_std"])
+                terms.append(value)
+                logs["loss/variance_patch_mean"] = value
+                logs["latent/std_full_clean_patch_mean"] = std
+            if self.loss_cfg["variance_feature"] in ("cls", "both"):
+                value, std = variance_hinge(
+                    full["cls_token"], self.loss_cfg["variance_target_std"])
+                terms.append(value)
+                logs["loss/variance_cls"] = value
+                logs["latent/std_full_clean_cls"] = std
+            variance_loss = torch.stack(terms).mean()
+            total = total + self.loss_cfg["lambda_variance"] * variance_loss
+            logs["loss/variance"] = variance_loss
+            logs["loss/weighted_variance"] = self.loss_cfg["lambda_variance"] * variance_loss
         logs.update({"loss/total": total, "loss/cls_global": glob})
         return total, logs
 

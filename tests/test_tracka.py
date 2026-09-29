@@ -14,7 +14,8 @@ from tracka.data import (CLEAN_RGB, FourViewDataset, check_state, generate, new_
                          render_state, sample_colors, state_errors, validate_dataset, valid_colors)
 from tracka.logging import RunLogger
 from tracka.model import (RobustMAE, ScratchEncoder, gather_tokens, patchify,
-                          resolved_mask_ratios, sample_mask, unpatchify)
+                          resolved_mask_ratios, resolved_variance_config, sample_mask,
+                          unpatchify, variance_hinge)
 from tracka.probes import LinearProbe, evaluate, physical_targets
 from tracka.train import train
 
@@ -176,6 +177,46 @@ def test_cls_contract_and_global(cfg):
     assert model.decoder.global_proj.weight.grad.abs().sum() > 0
 
 
+def test_label_free_variance_regularization(cfg, monkeypatch):
+    import tracka.model as model_module
+
+    flat, flat_std = variance_hinge(torch.ones(4, 8), .1)
+    varied, varied_std = variance_hinge(torch.tensor([[0.], [1.], [2.], [3.]]), .1)
+    assert flat > 0 and flat_std < .1
+    assert varied == 0 and varied_std > .1
+    cfg["model"]["use_cls"] = True
+    cfg["loss"].update(lambda_variance=.1, variance_target_std=2.0,
+                       variance_feature="both")
+    model = RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
+    batch = random_batch(cfg)
+    observed = []
+    original = model_module.ScratchEncoder.forward_features
+
+    def record_features(self, images, return_cls=False, ids_keep=None):
+        observed.append(ids_keep is None)
+        return original(self, images, return_cls=return_cls, ids_keep=ids_keep)
+
+    monkeypatch.setattr(model_module.ScratchEncoder, "forward_features", record_features)
+    loss, logs = model.objective(batch, "corruption_only")
+    assert torch.isfinite(loss)
+    assert observed == [False, False, True]
+    assert logs["loss/variance"] > 0
+    assert logs["loss/variance_patch_mean"] > 0
+    assert logs["loss/variance_cls"] > 0
+    assert torch.allclose(logs["loss/weighted_variance"], .1 * logs["loss/variance"])
+    model.zero_grad()
+    logs["loss/variance"].backward()
+    assert model.encoder.patch_embed.weight.grad.abs().sum() > 0
+    assert all("state" not in key for key in batch)
+    no_cls = copy.deepcopy(cfg)
+    no_cls["model"]["use_cls"] = False
+    with pytest.raises(ValueError, match="requires model.use_cls=true"):
+        RobustMAE(no_cls["model"], no_cls["decoder"], no_cls["loss"], no_cls["mask"])
+    assert resolved_variance_config({"lambda_cls_global": 0}) == resolved_variance_config(
+        {"lambda_cls_global": 0, "lambda_variance": 0.0,
+         "variance_target_std": .1, "variance_feature": "patch_mean"})
+
+
 def test_colors_reset_and_wrapped_angle(cfg):
     rng = np.random.RandomState(2)
     cc = cfg["dataset"]["color_sampling"]
@@ -232,6 +273,8 @@ def test_resume_equivalence(generated, tmp_path):
     legacy = load_checkpoint(out / "checkpoint_latest.pt")
     legacy["config"]["mask"].pop("render_ratio")
     legacy["config"]["mask"].pop("corruption_ratio")
+    for key in ("lambda_variance", "variance_target_std", "variance_feature"):
+        legacy["config"]["loss"].pop(key)
     legacy_path = out / "legacy_ratio_only.pt"
     torch.save(legacy, legacy_path)
     cfg["training"].update(total_optimizer_updates=4, resume=str(legacy_path))
@@ -256,6 +299,27 @@ def test_mixed_mask_training_and_resume_guard(generated, tmp_path):
     cfg["mask"]["corruption_ratio"] = .5
     with pytest.raises(ValueError, match="Resume configuration differs: mask"):
         train(cfg)
+    cfg["mask"]["corruption_ratio"] = .25
+    cfg["loss"]["lambda_variance"] = .1
+    with pytest.raises(ValueError, match="Resume configuration differs: loss"):
+        train(cfg)
+
+
+def test_variance_training_smoke(generated, tmp_path):
+    cfg = generated
+    cfg["model"]["use_cls"] = True
+    cfg["decoder"]["use_cls_global_decoder"] = True
+    cfg["loss"].update(lambda_cls_global=.1, lambda_variance=.1,
+                       variance_target_std=.1, variance_feature="both")
+    cfg["training"].update(objective="robust_alternating", output_dir=str(tmp_path / "variance"))
+    out = train(cfg)
+    records = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
+    updates = [r for r in records if "loss/weighted_variance" in r]
+    assert len(updates) == 2
+    assert all("latent/std_full_clean_patch_mean" in r and "latent/std_full_clean_cls" in r
+               for r in updates)
+    state = load_checkpoint(out / "checkpoint_latest.pt")
+    assert state["config"]["loss"]["lambda_variance"] == .1
 
 
 def test_linear_probe_toy():

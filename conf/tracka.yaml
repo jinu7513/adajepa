@@ -31,6 +31,9 @@ loss:
   lambda_render_inv: 1.0
   lambda_corr_inv: 1.0
   lambda_cls_global: 0.0
+  lambda_variance: 0.0  # Optional label-free anti-collapse loss; zero preserves old runs.
+  variance_target_std: 0.1
+  variance_feature: patch_mean  # patch_mean | cls | both
 
 dataset:
   schema_version: tracka-four-view-v1
