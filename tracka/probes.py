@@ -86,6 +86,11 @@ def state_metrics(probe, features, targets):
 
 def load_reference(cfg, device):
     ec = cfg["evaluation"]
+    feature = ec.get("feature", "patch_mean")
+    if feature not in ("patch_mean", "cls"):
+        raise ValueError("evaluation.feature must be patch_mean or cls")
+    if feature == "cls" and ec["encoder"] == "dino":
+        raise ValueError("evaluation.feature=cls is only supported for scratch checkpoint or random encoders")
     if ec["encoder"] == "checkpoint":
         if not ec["checkpoint"]:
             raise ValueError("evaluation.checkpoint is required")
@@ -132,20 +137,31 @@ def load_reference(cfg, device):
                     "patch_size": base.patch_size, "tokens": (resolution // base.patch_size)**2}
     else:
         raise ValueError("evaluation.encoder must be checkpoint, random, or dino")
+    if feature == "cls" and encoder.cls_token is None:
+        raise ValueError("evaluation.feature=cls requires an encoder trained with model.use_cls=true")
     encoder = encoder.to(device).eval()
     encoder.requires_grad_(False)
     metadata.update({"loader_normalization": "uint8 / 127.5 - 1", "loader_image_size": image_size,
-                     "pooling": "mean over patch tokens", "encoder": ec["encoder"]})
+                     "pooling": "mean over patch tokens" if feature == "patch_mean" else "CLS token",
+                     "feature": feature, "encoder": ec["encoder"]})
     return encoder, image_size, metadata
 
 
 @torch.no_grad()
-def extract_features(encoder, images, device, batch_size):
+def extract_features(encoder, images, device, batch_size, feature="patch_mean"):
+    if feature not in ("patch_mean", "cls"):
+        raise ValueError("evaluation.feature must be patch_mean or cls")
+    if feature == "cls" and (not isinstance(encoder, ScratchEncoder) or encoder.cls_token is None):
+        raise ValueError("CLS feature extraction requires a scratch encoder with model.use_cls=true")
     result = []
     for start in range(0, len(images), batch_size):
         array = np.stack(images[start:start + batch_size])
         x = torch.from_numpy(array).permute(0, 3, 1, 2).float().to(device) / 127.5 - 1
-        result.append(encoder(x).mean(1).cpu().numpy())
+        if feature == "cls":
+            representation = encoder.forward_features(x, return_cls=True)["cls_token"]
+        else:
+            representation = encoder(x).mean(1)
+        result.append(representation.cpu().numpy())
     return np.concatenate(result)
 
 
@@ -217,11 +233,14 @@ def evaluate(cfg):
     out = unique_output(ec["output_dir"], "probe_" + metadata["training_objective"])
     if out.exists() and any(out.iterdir()):
         raise FileExistsError("Evaluation output is not empty")
-    cfg["logging"]["name"] = cfg["logging"]["name"] or f"trackA-probe-{metadata['training_objective']}-seed{ec['seed']}"
+    default_name = f"trackA-probe-{metadata['training_objective']}-seed{ec['seed']}"
+    if metadata["feature"] == "cls":
+        default_name += "-cls"
+    cfg["logging"]["name"] = cfg["logging"]["name"] or default_name
     metadata.update({"manifest_sha256": manifest_hash, "config": cfg, **git_info(),
                      "evaluated_samples": {s: [(r["trajectory_id"], r["timestep"]) for r in ds.rows] for s, ds in data.items()}})
     def features(images):
-        return extract_features(encoder, images, device, ec["batch_size"])
+        return extract_features(encoder, images, device, ec["batch_size"], metadata["feature"])
     with RunLogger(out, cfg["logging"], metadata) as logger:
         images = {s: read_images(ds, "clean") for s, ds in data.items()}
         clean = {s: features(ims) for s, ims in images.items()}

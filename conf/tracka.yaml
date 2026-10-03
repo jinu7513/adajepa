@@ -113,6 +113,7 @@ logging:
 evaluation:
   encoder: checkpoint
   checkpoint: null
+  feature: patch_mean  # patch_mean | cls; cls requires a scratch encoder with model.use_cls=true.
   output_dir: null
   device: auto
   batch_size: 32

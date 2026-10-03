@@ -230,6 +230,12 @@ python eval_encoder_probes.py --config-name tracka \
   dataset.output_path="$PAIRS" evaluation.encoder=checkpoint \
   evaluation.checkpoint=/absolute/path/to/run/checkpoint_latest.pt
 
+# For checkpoints trained with model.use_cls=true, probe CLS instead of patch mean:
+python eval_encoder_probes.py --config-name tracka \
+  dataset.output_path="$PAIRS" evaluation.encoder=checkpoint \
+  evaluation.checkpoint=/absolute/path/to/run/checkpoint_latest.pt \
+  evaluation.feature=cls logging.name=trackA-probe-cls
+
 # After evaluating the selected objective/seed checkpoints:
 python aggregate_tracka_results.py \
   /absolute/path/to/probe_run_1 /absolute/path/to/probe_run_2 \

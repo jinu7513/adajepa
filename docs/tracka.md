@@ -222,6 +222,14 @@ python eval_encoder_probes.py --config-name tracka \
   evaluation.encoder=checkpoint \
   evaluation.checkpoint=/absolute/path/to/run/checkpoint_latest.pt
 
+# Evaluate the same checkpoint using its CLS token instead of patch-token mean.
+# The checkpoint must have been trained with model.use_cls=true.
+python eval_encoder_probes.py --config-name tracka \
+  dataset.output_path="$PAIRS" \
+  evaluation.encoder=checkpoint \
+  evaluation.checkpoint=/absolute/path/to/run/checkpoint_latest.pt \
+  evaluation.feature=cls logging.name=trackA-probe-cls
+
 python eval_encoder_probes.py --config-name tracka \
   dataset.output_path="$PAIRS" evaluation.encoder=random
 
@@ -235,6 +243,15 @@ on clean validation data. The SAME fitted probe evaluates all test conditions. E
 weights remain frozen. RGB regression probes use variable-color A/B views. Corruption
 strength regressors are fit separately for each type because strengths have different
 units. Insufficient per-type data is explicitly reported.
+
+`evaluation.feature=patch_mean` is the default and preserves historical probe
+results. `evaluation.feature=cls` uses the full-image CLS token from a scratch
+checkpoint (or a random scratch encoder with `model.use_cls=true`); DINO in this
+repository exposes patch tokens only, so CLS selection is rejected. Each CLS run
+fits a new clean-only linear probe with the same split, seed, and sample cap, then
+uses that fixed probe across all visual shifts. The run metadata records the selected
+feature. Compare the resulting `results.csv` against a separate patch-mean run;
+CLS variance alone is not a measure of state information or robustness.
 
 Results: `results.csv/json`, `diagnostics.json`, `physical_probe.npz`, RGB probe NPZs,
 `evaluation_views.json` (actual colors), and `robustness.png`. Metrics are reported for

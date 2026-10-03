@@ -16,7 +16,7 @@ from tracka.logging import RunLogger
 from tracka.model import (RobustMAE, ScratchEncoder, gather_tokens, patchify,
                           resolved_mask_ratios, resolved_variance_config, sample_mask,
                           unpatchify, variance_hinge)
-from tracka.probes import LinearProbe, evaluate, physical_targets
+from tracka.probes import LinearProbe, evaluate, extract_features, load_reference, physical_targets
 from tracka.train import train
 
 
@@ -333,6 +333,27 @@ def test_linear_probe_toy():
     assert np.mean((p.predict(x[80:]) - rgb[80:])**2) < 1e-9
 
 
+def test_probe_cls_feature_selection(cfg):
+    cfg["model"]["use_cls"] = True
+    cfg["evaluation"].update(encoder="random", feature="cls")
+    encoder, image_size, metadata = load_reference(cfg, torch.device("cpu"))
+    images = np.random.RandomState(7).randint(0, 256, (3, image_size, image_size, 3), dtype=np.uint8)
+    x = torch.from_numpy(images).permute(0, 3, 1, 2).float() / 127.5 - 1
+    with torch.no_grad():
+        expected_cls = encoder.forward_features(x, return_cls=True)["cls_token"].numpy()
+        expected_mean = encoder(x).mean(1).numpy()
+    np.testing.assert_allclose(extract_features(encoder, images, torch.device("cpu"), 2, "cls"), expected_cls)
+    np.testing.assert_allclose(extract_features(encoder, images, torch.device("cpu"), 2), expected_mean)
+    assert metadata["feature"] == "cls"
+    assert metadata["pooling"] == "CLS token"
+    cfg["model"]["use_cls"] = False
+    with pytest.raises(ValueError, match="model.use_cls=true"):
+        load_reference(cfg, torch.device("cpu"))
+    cfg["evaluation"]["encoder"] = "dino"
+    with pytest.raises(ValueError, match="only supported"):
+        load_reference(cfg, torch.device("cpu"))
+
+
 def test_probe_end_to_end(generated, tmp_path):
     cfg = generated
     cfg["evaluation"].update(encoder="random", output_dir=str(tmp_path / "eval"))
@@ -342,6 +363,23 @@ def test_probe_end_to_end(generated, tmp_path):
     assert any(r["segment"] == "middle" for r in rows)
     assert (out / "physical_probe.npz").exists()
     assert (out / "robustness.png").exists()
+
+
+def test_probe_cls_checkpoint_end_to_end(generated, tmp_path):
+    cfg = generated
+    cfg["model"]["use_cls"] = True
+    cfg["decoder"]["use_cls_global_decoder"] = True
+    cfg["loss"]["lambda_cls_global"] = .1
+    checkpoint = train(cfg) / "checkpoint_latest.pt"
+    cfg["evaluation"].update(encoder="checkpoint", checkpoint=str(checkpoint), feature="cls",
+                             output_dir=str(tmp_path / "cls_eval"))
+    out = evaluate(cfg)
+    metadata = json.loads((out / "run_metadata.json").read_text())
+    rows = json.loads((out / "results.json").read_text())
+    assert metadata["feature"] == "cls"
+    assert metadata["training_updates"] == 2
+    assert any(r["condition"] == "default" and r["segment"] == "full" for r in rows)
+    assert (out / "physical_probe.npz").exists()
 
 
 def test_logger_lifecycle_and_local_recovery(cfg, tmp_path):
