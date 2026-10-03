@@ -55,7 +55,9 @@ class Attention(nn.Module):
             nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
-        self.bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES).to('cuda')
+        # Keep the causal mask on the module's device. A hard-coded CUDA tensor
+        # prevented CPU smoke tests and could land on the wrong distributed GPU.
+        self.register_buffer("bias", generate_mask_matrix(NUM_PATCHES, NUM_FRAMES), persistent=False)
 
     def forward(self, x):
         (

@@ -7,6 +7,7 @@ import logging
 import warnings
 import threading
 import itertools
+import pickle
 import numpy as np
 from tqdm import tqdm
 from omegaconf import OmegaConf, open_dict
@@ -27,9 +28,55 @@ import custom_resolvers  # noqa: F401  # Registers OmegaConf resolvers at import
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+
+def validate_tracka_predictor_inputs(cfg):
+    """Fail before W&B initialization when the patch-token recipe is incomplete."""
+    if cfg.encoder.get("_target_") != "models.tracka_patch.TrackAPatchEncoder":
+        return
+    if cfg.env.name != "pusht":
+        raise ValueError("Track A patch predictor recipe currently supports env=pusht only")
+    if cfg.model.train_encoder or not cfg.model.train_predictor:
+        raise ValueError("Track A patch predictor requires a frozen encoder and trainable predictor")
+    if cfg.has_decoder or cfg.model.train_decoder:
+        raise ValueError("Track A patch predictor recipe requires has_decoder=false model.train_decoder=false")
+    if not cfg.training.save_frozen_encoder:
+        raise ValueError("Set training.save_frozen_encoder=true to make planning checkpoints self-contained")
+    encoder_path = Path(cfg.encoder.checkpoint_path)
+    if not encoder_path.is_absolute():
+        raise ValueError("TRACKA_ENCODER_CKPT must be an absolute path")
+    if not encoder_path.is_file():
+        raise FileNotFoundError(f"Track A encoder checkpoint not found: {encoder_path}")
+    data_root = Path(cfg.env.dataset.data_path)
+    if not data_root.is_absolute():
+        raise ValueError("DATASET_DIR must resolve to an absolute path")
+    required = ("states.pth", "rel_actions.pth", "seq_lengths.pkl", "velocities.pth")
+    missing = [str(data_root / split / name) for split in ("train", "val")
+               for name in required if not (data_root / split / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "PushT predictor training needs full train/val trajectories with actions "
+            "and videos, not only Track A image pairs. Missing: " + ", ".join(missing)
+        )
+    n_rollout = cfg.env.dataset.get("n_rollout")
+    for split in ("train", "val"):
+        split_path = data_root / split
+        with (split_path / "seq_lengths.pkl").open("rb") as stream:
+            lengths = pickle.load(stream)  # Trusted local PushT training artifact.
+        count = min(len(lengths), n_rollout) if n_rollout else len(lengths)
+        if count == 0:
+            raise ValueError(f"PushT {split} split has no trajectories: {split_path}")
+        missing.extend(str(split_path / "obses" / f"episode_{index:03d}.mp4")
+                       for index in range(count)
+                       if not (split_path / "obses" / f"episode_{index:03d}.mp4").is_file())
+    if missing:
+        raise FileNotFoundError("PushT trajectory videos missing: " + ", ".join(missing[:10])
+                                + (f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""))
+
+
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
+        validate_tracka_predictor_inputs(cfg)
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -101,17 +148,19 @@ class Trainer:
                 log.info(f"Resuming Wandb run {wandb_run_id}")
 
             wandb_dict = OmegaConf.to_container(cfg, resolve=True)
+            wandb_project = self.cfg.get("wandb_project") or f"temporal_straightening_{self.cfg.env.name}"
+            wandb_name = self.cfg.get("wandb_run_name") or model_name
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
                 self.wandb_run = wandb.init(
-                    project=f"temporal_straightening_{self.cfg.env.name}",
+                    project=wandb_project,
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
                 )
             else:
                 self.wandb_run = wandb.init(
-                    project=f"temporal_straightening_{self.cfg.env.name}",
+                    project=wandb_project,
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
@@ -119,7 +168,7 @@ class Trainer:
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
-            wandb.run.name = "{}".format(model_name)
+            wandb.run.name = wandb_name
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -143,7 +192,7 @@ class Trainer:
                 num_workers=self.cfg.env.num_workers,
                 collate_fn=None,
                 pin_memory=True,
-                persistent_workers=True,
+                persistent_workers=self.cfg.env.num_workers > 0,
             )
             for x in ["train", "valid"]
         }
@@ -170,9 +219,10 @@ class Trainer:
         self._keys_to_save = [
             "epoch",
         ]
-        self._keys_to_save += (
-            ["encoder", "encoder_optimizer"] if self.train_encoder else []
-        )
+        if self.train_encoder:
+            self._keys_to_save += ["encoder", "encoder_optimizer"]
+        elif self.cfg.training.get("save_frozen_encoder", False):
+            self._keys_to_save.append("encoder")
         self._keys_to_save += (
             ["predictor", "predictor_optimizer"]
             if self.train_predictor and self.cfg.has_predictor
@@ -311,7 +361,10 @@ class Trainer:
         else:
             decoder_scale = 16  # from vqvae
             num_side_patches = self.cfg.img_size // decoder_scale
-            num_patches = num_side_patches**2
+            num_patches = getattr(self.encoder, "num_patches", num_side_patches**2)
+            if getattr(self.encoder, "name", None) == "tracka_patch":
+                if self.encoder.image_size != self.cfg.img_size or num_patches != num_side_patches**2:
+                    raise ValueError("Track A image size/patch grid must match the PushT predictor configuration")
 
         if self.cfg.concat_dim == 0:
             num_patches += 2
@@ -362,9 +415,21 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
-        self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
-            self.encoder, self.predictor, self.decoder
-        )
+        # A frozen encoder is an inference-only target network: do not wrap it
+        # in DDP (which may reject modules with no trainable parameters). Never
+        # pass None to Accelerator.prepare for predictor/decoder-only recipes.
+        if not self.train_encoder:
+            self.encoder = self.encoder.to(self.device)
+        modules = [(name, module) for name, module in (
+            ("encoder", self.encoder if self.train_encoder else None),
+            ("predictor", self.predictor), ("decoder", self.decoder),
+        ) if module is not None]
+        if modules:
+            prepared = self.accelerator.prepare(*(module for _, module in modules))
+            if len(modules) == 1:
+                prepared = (prepared,)
+            for (name, _), module in zip(modules, prepared):
+                setattr(self, name, module)
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,
@@ -387,17 +452,19 @@ class Trainer:
         self._log_trainable_params(self.model, "model")
 
     def init_optimizers(self):
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr,
-        )
-        self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
-        if getattr(self, "_loaded_optim_state", None) and "encoder_optimizer" in self._loaded_optim_state:
-            try:
-                self.encoder_optimizer.load_state_dict(self._loaded_optim_state["encoder_optimizer"])
-                log.info(f"Loaded encoder optimizer state from checkpoint.")
-            except Exception as e:
-                log.warning(f"Failed to load encoder optimizer state: {e}")
+        self.encoder_optimizer = None
+        if self.train_encoder:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr,
+            )
+            self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
+            if getattr(self, "_loaded_optim_state", None) and "encoder_optimizer" in self._loaded_optim_state:
+                try:
+                    self.encoder_optimizer.load_state_dict(self._loaded_optim_state["encoder_optimizer"])
+                    log.info("Loaded encoder optimizer state from checkpoint.")
+                except Exception as e:
+                    log.warning(f"Failed to load encoder optimizer state: {e}")
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
@@ -567,7 +634,8 @@ class Trainer:
                 obs, act
             )
 
-            self.encoder_optimizer.zero_grad()
+            if self.encoder_optimizer is not None:
+                self.encoder_optimizer.zero_grad()
             if decoder_active:
                 self.decoder_optimizer.zero_grad()
             if self.cfg.has_predictor:
@@ -663,15 +731,20 @@ class Trainer:
         decoder_active = self.decoder_training_active()
         self.model.train_decoder = decoder_active
         self.model.eval()
-        if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
+        rollout_count = int(self.cfg.training.get("rollout_eval_count", 10))
+        if rollout_count < 0:
+            raise ValueError("training.rollout_eval_count must be nonnegative")
+        if len(self.train_traj_dset) > 0 and self.cfg.has_predictor and rollout_count:
             train_rollout_logs = self.openloop_rollout(
-                self.train_traj_dset, mode="train"
+                self.train_traj_dset, num_rollout=rollout_count, mode="train"
             )
             train_rollout_logs = {
                 f"train_{k}": [v] for k, v in train_rollout_logs.items()
             }
             self.logs_update(train_rollout_logs)
-            val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
+            val_rollout_logs = self.openloop_rollout(
+                self.val_traj_dset, num_rollout=rollout_count, mode="val"
+            )
             val_rollout_logs = {
                 f"val_{k}": [v] for k, v in val_rollout_logs.items()
             }

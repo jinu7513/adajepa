@@ -242,6 +242,12 @@ python aggregate_tracka_results.py \
   --output-dir "$PWD/tracka_outputs/comparison"
 ```
 
+To use a frozen Track A encoder's **full patch-token grid** for a newly trained
+PushT world-model predictor, see [the Track A predictor guide](docs/tracka_predictor.md).
+This requires the complete PushT trajectory dataset, including actions and
+videos; the four-view encoder pairs alone cannot train an action-conditioned
+predictor. The released DINO predictor is not reused unchanged.
+
 The aggregator rejects incompatible dataset/evaluation protocols and reports means
 and sample standard deviations across distinct training seeds; it does not compute
 confidence intervals. For random-scratch and frozen-DINO references, resume/recovery,

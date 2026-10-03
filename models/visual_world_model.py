@@ -120,6 +120,8 @@ class VWorldModel(nn.Module):
         super().train(mode)
         if self.train_encoder:
             self.encoder.train(mode)
+        else:
+            self.encoder.eval()
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
         self.proprio_encoder.train(mode)

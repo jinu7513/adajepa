@@ -566,11 +566,14 @@ class PlanWorkspace:
         return logs
 
 
-def load_ckpt(snapshot_path, device):
-    from models.dino import DinoV2Encoder
-    _ = DinoV2Encoder('dinov2_vits14', 'x_norm_patchtokens')
+def load_ckpt(snapshot_path, device, encoder_target=None):
+    # Legacy DINO checkpoints may need the torch.hub class registered before
+    # unpickling. Track A checkpoints must not download DINO unnecessarily.
+    if encoder_target is None or encoder_target == "models.dino.DinoV2Encoder":
+        from models.dino import DinoV2Encoder
+        _ = DinoV2Encoder('dinov2_vits14', 'x_norm_patchtokens')
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location=device, weights_only=False)
     loaded_keys = []
     result = {}
     for k, v in payload.items():
@@ -584,10 +587,12 @@ def load_ckpt(snapshot_path, device):
 def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     result = {}
     if model_ckpt.exists():
-        result = load_ckpt(model_ckpt, device)
+        result = load_ckpt(model_ckpt, device, encoder_target=train_cfg.encoder.get("_target_"))
         print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
 
     if "encoder" not in result:
+        if train_cfg.encoder.get("_target_") == "models.tracka_patch.TrackAPatchEncoder":
+            raise ValueError("Track A predictor checkpoint must contain its frozen encoder")
         result["encoder"] = hydra.utils.instantiate(
             train_cfg.encoder,
         )
