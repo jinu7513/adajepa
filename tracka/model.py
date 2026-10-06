@@ -52,17 +52,34 @@ def resolved_mask_ratios(mask):
 
 
 def resolved_variance_config(loss):
-    """Fill defaults for checkpoints saved before variance regularization existed."""
+    """Fill regularizer defaults for older checkpoints and validate ablations."""
     config = dict(loss)
     config.setdefault("lambda_variance", 0.0)
     config.setdefault("variance_target_std", 0.1)
     config.setdefault("variance_feature", "patch_mean")
+    config.setdefault("lambda_sigreg", 0.0)
+    config.setdefault("sigreg_target_std", 0.1)
+    config.setdefault("sigreg_feature", "both")
+    config.setdefault("sigreg_directions", 256)
+    config.setdefault("sigreg_knots", 17)
     if not math.isfinite(config["lambda_variance"]) or config["lambda_variance"] < 0:
         raise ValueError("loss.lambda_variance must be finite and nonnegative")
     if not math.isfinite(config["variance_target_std"]) or config["variance_target_std"] <= 0:
         raise ValueError("loss.variance_target_std must be finite and positive")
     if config["variance_feature"] not in ("patch_mean", "cls", "both"):
         raise ValueError("loss.variance_feature must be patch_mean, cls, or both")
+    if not math.isfinite(config["lambda_sigreg"]) or config["lambda_sigreg"] < 0:
+        raise ValueError("loss.lambda_sigreg must be finite and nonnegative")
+    if not math.isfinite(config["sigreg_target_std"]) or config["sigreg_target_std"] <= 0:
+        raise ValueError("loss.sigreg_target_std must be finite and positive")
+    if config["sigreg_feature"] not in ("patch_mean", "cls", "both"):
+        raise ValueError("loss.sigreg_feature must be patch_mean, cls, or both")
+    if type(config["sigreg_directions"]) is not int or config["sigreg_directions"] < 1:
+        raise ValueError("loss.sigreg_directions must be a positive integer")
+    if type(config["sigreg_knots"]) is not int or config["sigreg_knots"] < 2:
+        raise ValueError("loss.sigreg_knots must be an integer >= 2")
+    if config["lambda_variance"] and config["lambda_sigreg"]:
+        raise ValueError("Choose either loss.lambda_variance or loss.lambda_sigreg, not both")
     return config
 
 
@@ -76,6 +93,30 @@ def variance_hinge(features, target_std):
         return zero, zero
     std = (features.float().var(dim=0, unbiased=False) + 1e-4).sqrt()
     return torch.relu(target_std - std).mean(), std.mean()
+
+
+def sigreg_loss(features, target_std, directions=256, knots=17):
+    """Batch-scaled SIGReg ECF statistic against N(0, target_std^2 I).
+
+    Uses the positive-half quadrature and Gaussian window from the official
+    LeJEPA minimal implementation. The fixed input scale is explicit because
+    Track A features have much smaller standard deviation than unit Gaussian.
+    """
+    if features.ndim != 2:
+        raise ValueError("SIGReg expects one vector per image")
+    if features.size(0) < 2:
+        return features.sum() * 0
+    x = features.float() / target_std
+    a = torch.randn(x.size(1), directions, device=x.device, dtype=x.dtype)
+    a = a / a.norm(dim=0, keepdim=True).clamp_min(1e-12)
+    t = torch.linspace(0, 3, knots, device=x.device, dtype=x.dtype)
+    dt = 3 / (knots - 1)
+    window = torch.exp(-t.square() / 2)
+    weights = torch.full_like(t, 2 * dt) * window
+    weights[[0, -1]] *= 0.5
+    phase = (x @ a).unsqueeze(-1) * t
+    error = (phase.cos().mean(0) - window).square() + phase.sin().mean(0).square()
+    return (error @ weights).mean() * x.size(0)
 
 
 def gather_tokens(tokens, ids):
@@ -205,9 +246,11 @@ class RobustMAE(nn.Module):
         self.decoder = SharedDecoder(self.encoder, **decoder)
         self.loss_cfg = resolved_variance_config(loss)
         self.mask_ratios = resolved_mask_ratios(mask)
-        if self.loss_cfg["lambda_variance"] and self.loss_cfg["variance_feature"] in ("cls", "both"):
+        selected_feature = (self.loss_cfg["variance_feature"] if self.loss_cfg["lambda_variance"]
+                            else self.loss_cfg["sigreg_feature"])
+        if (self.loss_cfg["lambda_variance"] or self.loss_cfg["lambda_sigreg"]) and selected_feature in ("cls", "both"):
             if self.encoder.cls_token is None:
-                raise ValueError("CLS variance regularization requires model.use_cls=true")
+                raise ValueError("CLS regularization requires model.use_cls=true")
 
     def target(self, images):
         target = patchify(images, self.encoder.patch_size)
@@ -266,28 +309,38 @@ class RobustMAE(nn.Module):
                          "latent/" + prefix + "_distance": inv.sqrt(),
                          "latent/norm_" + prefix: torch.stack([v.norm(dim=-1).mean() for v in shifted]).mean()})
         total = total + self.loss_cfg["lambda_cls_global"] * glob
-        if self.loss_cfg["lambda_variance"]:
+        if self.loss_cfg["lambda_variance"] or self.loss_cfg["lambda_sigreg"]:
             # The training mask is sampled independently for each image. Regularize
             # full-image features so mask-pattern variation cannot satisfy this term.
             full = self.encoder.forward_features(
                 batch["clean"], return_cls=self.encoder.cls_token is not None)
             terms = []
-            if self.loss_cfg["variance_feature"] in ("patch_mean", "both"):
-                value, std = variance_hinge(
-                    full["patch_tokens"].mean(1), self.loss_cfg["variance_target_std"])
+            kind = "variance" if self.loss_cfg["lambda_variance"] else "sigreg"
+            feature = self.loss_cfg[kind + "_feature"]
+
+            def regularize(v):
+                if kind == "variance":
+                    return variance_hinge(v, self.loss_cfg["variance_target_std"])
+                value = sigreg_loss(v, self.loss_cfg["sigreg_target_std"],
+                                    self.loss_cfg["sigreg_directions"], self.loss_cfg["sigreg_knots"])
+                std = (v.float().var(dim=0, unbiased=False) + 1e-4).sqrt().mean()
+                return value, std
+
+            if feature in ("patch_mean", "both"):
+                value, std = regularize(full["patch_tokens"].mean(1))
                 terms.append(value)
-                logs["loss/variance_patch_mean"] = value
+                logs["loss/" + kind + "_patch_mean"] = value
                 logs["latent/std_full_clean_patch_mean"] = std
-            if self.loss_cfg["variance_feature"] in ("cls", "both"):
-                value, std = variance_hinge(
-                    full["cls_token"], self.loss_cfg["variance_target_std"])
+            if feature in ("cls", "both"):
+                value, std = regularize(full["cls_token"])
                 terms.append(value)
-                logs["loss/variance_cls"] = value
+                logs["loss/" + kind + "_cls"] = value
                 logs["latent/std_full_clean_cls"] = std
-            variance_loss = torch.stack(terms).mean()
-            total = total + self.loss_cfg["lambda_variance"] * variance_loss
-            logs["loss/variance"] = variance_loss
-            logs["loss/weighted_variance"] = self.loss_cfg["lambda_variance"] * variance_loss
+            regularizer_loss = torch.stack(terms).mean()
+            weighted = self.loss_cfg["lambda_" + kind] * regularizer_loss
+            total = total + weighted
+            logs["loss/" + kind] = regularizer_loss
+            logs["loss/weighted_" + kind] = weighted
         logs.update({"loss/total": total, "loss/cls_global": glob})
         return total, logs
 

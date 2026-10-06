@@ -61,8 +61,9 @@ def train(cfg):
         raise ValueError("Unknown training.objective")
     if tc["total_optimizer_updates"] < 1 or tc["batch_size"] < 1:
         raise ValueError("Training update count and batch size must be positive")
-    if cfg["loss"].get("lambda_variance", 0) and tc["batch_size"] < 2:
-        raise ValueError("Variance regularization requires training.batch_size >= 2")
+    loss_cfg = resolved_variance_config(cfg["loss"])
+    if (loss_cfg["lambda_variance"] or loss_cfg["lambda_sigreg"]) and tc["batch_size"] < 2:
+        raise ValueError("Variance/SIGReg regularization requires training.batch_size >= 2")
     if objective == "robust_alternating" and (tc["total_optimizer_updates"] % 2 or not tc["equal_render_corruption_schedule"]):
         raise ValueError("robust_alternating requires an even update budget and equal schedule")
     for n in (tc["save_every"], tc["validate_every"], cfg["logging"]["log_every"], cfg["logging"]["image_every"]):
@@ -121,6 +122,8 @@ def train(cfg):
     if ratios["render_only"] != ratios["clean_mae"] or ratios["corruption_only"] != ratios["clean_mae"]:
         run_name = (f"trackA-{objective}-{cfg['decoder']['conditioning']}"
                     f"-render{ratios['render_only']*100:g}-corr{ratios['corruption_only']*100:g}-seed{tc['seed']}")
+    if loss_cfg["lambda_sigreg"]:
+        run_name += f"-sigreg-{loss_cfg['sigreg_feature']}-w{loss_cfg['lambda_sigreg']:g}"
     cfg["logging"]["name"] = cfg["logging"]["name"] or run_name
     write_json(out / "config.json", cfg)
     metadata = {"config": cfg, **git_info(), "manifest_sha256": manifest_hash,

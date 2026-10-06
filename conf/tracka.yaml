@@ -34,6 +34,11 @@ loss:
   lambda_variance: 0.0  # Optional label-free anti-collapse loss; zero preserves old runs.
   variance_target_std: 0.1
   variance_feature: patch_mean  # patch_mean | cls | both
+  lambda_sigreg: 0.0  # Alternative to lambda_variance; never enable both.
+  sigreg_target_std: 0.1  # Fixed target std in raw full-clean feature space.
+  sigreg_feature: both  # patch_mean | cls | both
+  sigreg_directions: 256
+  sigreg_knots: 17
 
 dataset:
   schema_version: tracka-four-view-v1

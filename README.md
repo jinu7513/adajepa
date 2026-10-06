@@ -199,6 +199,13 @@ unmasked clean-image features and logs its contribution separately; see
 `docs/tracka.md` for the formula and smoke-test command. It does not use PushT
 state labels and is not the full VICReg objective.
 
+As an alternative (not an addition) to the variance term, set
+`loss.lambda_variance=0 loss.lambda_sigreg=0.001` to apply batch-scaled SIGReg
+to the unmasked clean patch mean and CLS features (`model.use_cls=true`). The
+default SIGReg weight is zero. Its raw target standard deviation is `0.1`;
+`0.001` is a pilot weight, not a validated optimum. See `docs/tracka.md` for
+the exact command, formula, and W&B metrics.
+
 ```bash
 python train_encoder.py --config-name tracka \
   dataset.output_path="$PAIRS" training.objective=robust_alternating \

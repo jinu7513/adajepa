@@ -178,6 +178,56 @@ standard deviations. Compare against the zero-weight model with the same dataset
 seed, masking schedule, update count, and probe settings. A higher feature standard
 deviation alone is not evidence of improved PushT control or robustness.
 
+### SIGReg instead of the variance floor
+
+`loss.lambda_sigreg` selects a label-free SIGReg ablation. It is **mutually
+exclusive** with `loss.lambda_variance`: set the latter to zero. The default
+settings apply SIGReg separately to the unmasked full-clean patch-token mean
+and CLS token, then average the two losses (`loss.sigreg_feature=both`). CLS
+requires `model.use_cls=true`. This keeps the reconstruction, invariance,
+global-CLS, mask, and dataset paths unchanged; it is not a full LeJEPA model.
+
+For each feature vector `z`, the implementation divides by the fixed
+`loss.sigreg_target_std` (default `0.1`), samples 256 random unit directions,
+and compares the empirical characteristic function of each projection to a
+unit Gaussian at 17 knots on `[0, 3]`. It uses the Gaussian-windowed
+positive-half quadrature and multiplies the mean statistic by batch size,
+following the [official minimal implementation](https://github.com/galilai-group/lejepa/blob/main/MINIMAL.md).
+For selected features `F` (patch mean, CLS, or both), the added loss is
+`lambda_sigreg / |F| * sum_{f in F} SIGReg(z_f / sigreg_target_std)`.
+The statistic compares the cosine/sine batch means of projected features to
+the standard Gaussian characteristic function `exp(-t^2/2)`.
+Equivalently, the target for *raw* features is an isotropic Gaussian with
+standard deviation `0.1`. Unlike a one-sided variance floor, this penalizes
+distribution mismatch in either direction; the same target for patch mean and
+CLS may therefore be restrictive. This is an experiment, not a performance
+guarantee. Training batch size must be at least two; the rare validation batch
+of one contributes zero to SIGReg.
+
+From the repository root on CIRCE, run a short new experiment first:
+
+```bash
+python train_encoder.py --config-name tracka \
+  dataset.output_path=data/pairs training.objective=robust_alternating \
+  training.total_optimizer_updates=200 training.batch_size=16 training.seed=0 \
+  model.use_cls=true decoder.use_cls_global_decoder=true loss.lambda_cls_global=0.1 \
+  mask.ratio=0.5 mask.render_ratio=0.5 mask.corruption_ratio=0.25 \
+  loss.lambda_variance=0 loss.lambda_sigreg=0.001 \
+  loss.sigreg_target_std=0.1 loss.sigreg_feature=both \
+  logging.name=trackA-sigreg-both-200-seed0 logging.fallback_to_local=false
+```
+
+The new W&B/local keys are `loss/sigreg`, `loss/weighted_sigreg`,
+`loss/sigreg_patch_mean`, and `loss/sigreg_cls`; the existing full-clean
+feature standard-deviation keys remain. Compare the weighted SIGReg magnitude
+with reconstruction and invariance losses during this pilot; tune the weight
+only after inspecting these values. `0.001` is specific to this batch-scaled,
+fixed-target implementation and is not interchangeable with the old variance
+weight `0.1`. For a fair ablation, start a **new** run from scratch rather than
+resuming a variance checkpoint; the resume guard rejects loss changes. Then
+run the same clean-trained frozen probes before deciding on expensive
+predictor training.
+
 ## 3. Resume and recover logging
 
 ```bash
