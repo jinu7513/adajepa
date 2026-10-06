@@ -200,11 +200,14 @@ unmasked clean-image features and logs its contribution separately; see
 state labels and is not the full VICReg objective.
 
 As an alternative (not an addition) to the variance term, set
-`loss.lambda_variance=0 loss.lambda_sigreg=0.001` to apply batch-scaled SIGReg
-to the unmasked clean patch mean and CLS features (`model.use_cls=true`). The
-default SIGReg weight is zero. Its raw target standard deviation is `0.1`;
-`0.001` is a pilot weight, not a validated optimum. See `docs/tracka.md` for
-the exact command, formula, and W&B metrics.
+`loss.lambda_variance=0 loss.lambda_sigreg=0.001 model.use_cls=true` to pilot
+SIGReg on a trainable CLS projector (`loss.sigreg_space=projector`, the default).
+`loss.sigreg_feature=patch_tokens` selects a separate spatial patch-token
+projector; `both_spatial` averages both branches. These projector outputs target
+`N(0,I)` and do not change the encoder interface used by the predictor. The
+older raw-feature `target_std=0.1` pilot is retained only as an explicit legacy
+reproduction mode; do not use it for new training. See `docs/tracka.md` for
+commands, limitations, and W&B metrics.
 
 ```bash
 python train_encoder.py --config-name tracka \

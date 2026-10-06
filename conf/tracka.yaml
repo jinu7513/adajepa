@@ -35,10 +35,14 @@ loss:
   variance_target_std: 0.1
   variance_feature: patch_mean  # patch_mean | cls | both
   lambda_sigreg: 0.0  # Alternative to lambda_variance; never enable both.
-  sigreg_target_std: 0.1  # Fixed target std in raw full-clean feature space.
-  sigreg_feature: both  # patch_mean | cls | both
+  sigreg_space: projector  # projector (recommended) | raw (legacy reproduction only)
+  sigreg_target_std: 1.0  # Projector space targets N(0,I).
+  sigreg_feature: cls  # cls | patch_tokens | both_spatial | patch_mean | both
   sigreg_directions: 256
   sigreg_knots: 17
+  sigreg_projector_hidden_dim: 512
+  sigreg_projector_dim: 128
+  sigreg_patch_samples: 8  # Shared spatial positions across images per update.
 
 dataset:
   schema_version: tracka-four-view-v1

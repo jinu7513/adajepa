@@ -181,30 +181,40 @@ deviation alone is not evidence of improved PushT control or robustness.
 ### SIGReg instead of the variance floor
 
 `loss.lambda_sigreg` selects a label-free SIGReg ablation. It is **mutually
-exclusive** with `loss.lambda_variance`: set the latter to zero. The default
-settings apply SIGReg separately to the unmasked full-clean patch-token mean
-and CLS token, then average the two losses (`loss.sigreg_feature=both`). CLS
-requires `model.use_cls=true`. This keeps the reconstruction, invariance,
-global-CLS, mask, and dataset paths unchanged; it is not a full LeJEPA model.
+exclusive** with `loss.lambda_variance`. For **new** experiments the default
+`loss.sigreg_space=projector` places a trainable
+`Linear(384,512) -> BatchNorm -> GELU -> Linear(512,128)` after the selected
+full-clean encoder features, then applies SIGReg to the **projector output**
+against `N(0,I)`. CLS requires `model.use_cls=true`. This follows the projector
+placement used in [LeWorldModel](https://arxiv.org/pdf/2603.19312) and the
+[official code](https://github.com/lucas-maes/le-wm/blob/main/config/train/model/lewm.yaml),
+but our reconstruction/invariance training is **not** LeWorldModel or LeJEPA.
+The training-only projectors are saved for exact resume; the exported encoder
+still returns the same spatial patch tokens for the predictor.
 
-For each feature vector `z`, the implementation divides by the fixed
-`loss.sigreg_target_std` (default `0.1`), samples 256 random unit directions,
-and compares the empirical characteristic function of each projection to a
-unit Gaussian at 17 knots on `[0, 3]`. It uses the Gaussian-windowed
-positive-half quadrature and multiplies the mean statistic by batch size,
-following the [official minimal implementation](https://github.com/galilai-group/lejepa/blob/main/MINIMAL.md).
-For selected features `F` (patch mean, CLS, or both), the added loss is
-`lambda_sigreg / |F| * sum_{f in F} SIGReg(z_f / sigreg_target_std)`.
-The statistic compares the cosine/sine batch means of projected features to
-the standard Gaussian characteristic function `exp(-t^2/2)`.
-Equivalently, the target for *raw* features is an isotropic Gaussian with
-standard deviation `0.1`. Unlike a one-sided variance floor, this penalizes
-distribution mismatch in either direction; the same target for patch mean and
-CLS may therefore be restrictive. This is an experiment, not a performance
-guarantee. Training batch size must be at least two; the rare validation batch
-of one contributes zero to SIGReg.
+`sigreg_feature=cls` selects the paper-inspired CLS branch.
+`sigreg_feature=patch_tokens` is our **experimental spatial extension**: each
+update samples `sigreg_patch_samples=8` shared patch locations on full clean
+images, projects their tokens, computes SIGReg over different images at each
+location, and averages over locations. Spatial positions alone therefore cannot
+satisfy the distribution match. `sigreg_feature=both_spatial` averages the CLS
+and spatial losses with separate projectors. Optional `patch_mean` and `both`
+retain a projected patch-mean ablation; they do **not** mean spatial SIGReg.
+For either branch, `L_sig = lambda_sigreg * mean(SIGReg(projector(full_clean_feature)))`;
+the spatial branch also averages over
+the sampled locations after evaluating each location across different images.
+The spatial term can force variation even at normally static background patches,
+so only probe results—not a low SIGReg loss—can establish its usefulness.
 
-From the repository root on CIRCE, run a short new experiment first:
+SIGReg compares random one-dimensional projections to a standard Gaussian's
+characteristic function `exp(-t^2/2)` using 17 quadrature knots and 256 random
+directions by default. It includes the official batch-size factor. In projector
+mode `loss.sigreg_target_std` must be `1.0`; unlike the old variance hinge, this
+is a **full distribution target**, not a one-sided `0.1` floor. Training batch
+size must be at least two; a validation batch of one contributes zero to SIGReg.
+
+From the repository root on CIRCE, run separate 200-update pilots (not resumes
+from the previous raw-feature run). First, CLS projector:
 
 ```bash
 python train_encoder.py --config-name tracka \
@@ -212,21 +222,31 @@ python train_encoder.py --config-name tracka \
   training.total_optimizer_updates=200 training.batch_size=16 training.seed=0 \
   model.use_cls=true decoder.use_cls_global_decoder=true loss.lambda_cls_global=0.1 \
   mask.ratio=0.5 mask.render_ratio=0.5 mask.corruption_ratio=0.25 \
-  loss.lambda_variance=0 loss.lambda_sigreg=0.001 \
-  loss.sigreg_target_std=0.1 loss.sigreg_feature=both \
-  logging.name=trackA-sigreg-both-200-seed0 logging.fallback_to_local=false
+  loss.lambda_variance=0 loss.lambda_sigreg=0.001 loss.sigreg_feature=cls \
+  logging.name=trackA-sigreg-projector-cls-200-seed0 logging.fallback_to_local=false
 ```
 
-The new W&B/local keys are `loss/sigreg`, `loss/weighted_sigreg`,
-`loss/sigreg_patch_mean`, and `loss/sigreg_cls`; the existing full-clean
-feature standard-deviation keys remain. Compare the weighted SIGReg magnitude
-with reconstruction and invariance losses during this pilot; tune the weight
-only after inspecting these values. `0.001` is specific to this batch-scaled,
-fixed-target implementation and is not interchangeable with the old variance
-weight `0.1`. For a fair ablation, start a **new** run from scratch rather than
-resuming a variance checkpoint; the resume guard rejects loss changes. Then
-run the same clean-trained frozen probes before deciding on expensive
-predictor training.
+For the spatial patch-token pilot, rerun that command with
+`loss.sigreg_feature=patch_tokens` and
+`logging.name=trackA-sigreg-projector-patch-200-seed0`. For a combined pilot,
+use `loss.sigreg_feature=both_spatial` and a distinct run name. The `0.001`
+weight is only a starting hypothesis; compare `loss/weighted_sigreg` to
+reconstruction/invariance, the raw and projected feature std keys, and frozen
+clean/shift probes before extending training. W&B/local keys include
+`loss/sigreg`, `loss/weighted_sigreg`, `loss/sigreg_cls`,
+`loss/sigreg_patch_tokens`, `latent/std_projected_cls`, and
+`latent/std_projected_patch_tokens` when selected. `sigreg/patch_samples` records
+the number of spatial locations. Neither the raw `0.001` run nor LeWM's loss
+coefficient transfers automatically to these new heads.
+
+For historical reproduction only, `loss.sigreg_space=raw`,
+`loss.sigreg_target_std=0.1`, and `loss.sigreg_feature=both` retain the earlier direct
+patch-mean/CLS penalty, including its old checkpoint resume semantics. It is
+**not recommended**: the CLS final LayerNorm constrains its vector norm, while
+the `0.1` isotropic-Gaussian target requires a much smaller one. The previous
+200-update run showed a large weighted SIGReg loss without measurable feature
+spread. Do not resume it into a projector experiment; the configuration guard
+rejects that change.
 
 ## 3. Resume and recover logging
 

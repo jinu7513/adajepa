@@ -12,7 +12,8 @@ from .common import (absolute, file_hash, git_info, load_checkpoint, restore_rng
                      rng_state, seed_all, write_json)
 from .data import FourViewDataset
 from .logging import RunLogger
-from .model import RobustMAE, resolved_mask_ratios, resolved_variance_config
+from .model import (RobustMAE, comparable_loss_config, resolved_mask_ratios,
+                    resolved_variance_config)
 
 
 def device_for(choice):
@@ -85,7 +86,7 @@ def train(cfg):
         for key in ("model", "decoder"):
             if checkpoint["config"][key] != cfg[key]:
                 raise ValueError("Resume configuration differs: " + key)
-        if resolved_variance_config(checkpoint["config"]["loss"]) != resolved_variance_config(cfg["loss"]):
+        if comparable_loss_config(checkpoint["config"]["loss"]) != comparable_loss_config(cfg["loss"]):
             raise ValueError("Resume configuration differs: loss")
         if resolved_mask_ratios(checkpoint["config"]["mask"]) != resolved_mask_ratios(cfg["mask"]):
             raise ValueError("Resume configuration differs: mask")
@@ -97,6 +98,15 @@ def train(cfg):
                 raise ValueError("Resume must use the original W&B " + key)
         model.encoder.load_state_dict(checkpoint["encoder"])
         model.decoder.load_state_dict(checkpoint["decoder"])
+        saved_projectors = checkpoint.get("sigreg_projectors", {})
+        for name in ("sigreg_cls_projector", "sigreg_patch_projector"):
+            module = getattr(model, name)
+            if module is not None:
+                if name not in saved_projectors:
+                    raise ValueError("Resume checkpoint lacks " + name)
+                module.load_state_dict(saved_projectors[name])
+            elif name in saved_projectors:
+                raise ValueError("Resume checkpoint has unexpected " + name)
         optimizer.load_state_dict(checkpoint["optimizer"])
         step, draws, resume_id = checkpoint["global_step"], checkpoint["samples_drawn"], checkpoint.get("wandb_run_id")
         encoded_images = checkpoint.get("encoded_images", 0)
@@ -123,7 +133,8 @@ def train(cfg):
         run_name = (f"trackA-{objective}-{cfg['decoder']['conditioning']}"
                     f"-render{ratios['render_only']*100:g}-corr{ratios['corruption_only']*100:g}-seed{tc['seed']}")
     if loss_cfg["lambda_sigreg"]:
-        run_name += f"-sigreg-{loss_cfg['sigreg_feature']}-w{loss_cfg['lambda_sigreg']:g}"
+        run_name += (f"-sigreg-{loss_cfg['sigreg_space']}-{loss_cfg['sigreg_feature']}"
+                     f"-w{loss_cfg['lambda_sigreg']:g}")
     cfg["logging"]["name"] = cfg["logging"]["name"] or run_name
     write_json(out / "config.json", cfg)
     metadata = {"config": cfg, **git_info(), "manifest_sha256": manifest_hash,
@@ -170,6 +181,10 @@ def train(cfg):
                 restore_rng(prior)
             if step % tc["save_every"] == 0 or step == tc["total_optimizer_updates"]:
                 state = {"encoder": model.encoder.state_dict(), "decoder": model.decoder.state_dict(),
+                         "sigreg_projectors": {
+                             name: getattr(model, name).state_dict()
+                             for name in ("sigreg_cls_projector", "sigreg_patch_projector")
+                             if getattr(model, name) is not None},
                          "optimizer": optimizer.state_dict(), "epoch": draws // len(data),
                          "global_step": step, "cycle": step // 2 if objective == "robust_alternating" else 0,
                          "next_update_type": objective_for(objective, step), "samples_drawn": draws,

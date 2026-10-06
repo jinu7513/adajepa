@@ -54,14 +54,19 @@ def resolved_mask_ratios(mask):
 def resolved_variance_config(loss):
     """Fill regularizer defaults for older checkpoints and validate ablations."""
     config = dict(loss)
+    legacy_sigreg = "sigreg_space" not in config and config.get("lambda_sigreg", 0) > 0
     config.setdefault("lambda_variance", 0.0)
     config.setdefault("variance_target_std", 0.1)
     config.setdefault("variance_feature", "patch_mean")
     config.setdefault("lambda_sigreg", 0.0)
-    config.setdefault("sigreg_target_std", 0.1)
-    config.setdefault("sigreg_feature", "both")
+    config.setdefault("sigreg_space", "raw" if legacy_sigreg else "projector")
+    config.setdefault("sigreg_target_std", 0.1 if legacy_sigreg else 1.0)
+    config.setdefault("sigreg_feature", "both" if legacy_sigreg else "cls")
     config.setdefault("sigreg_directions", 256)
     config.setdefault("sigreg_knots", 17)
+    config.setdefault("sigreg_projector_hidden_dim", 512)
+    config.setdefault("sigreg_projector_dim", 128)
+    config.setdefault("sigreg_patch_samples", 8)
     if not math.isfinite(config["lambda_variance"]) or config["lambda_variance"] < 0:
         raise ValueError("loss.lambda_variance must be finite and nonnegative")
     if not math.isfinite(config["variance_target_std"]) or config["variance_target_std"] <= 0:
@@ -72,14 +77,39 @@ def resolved_variance_config(loss):
         raise ValueError("loss.lambda_sigreg must be finite and nonnegative")
     if not math.isfinite(config["sigreg_target_std"]) or config["sigreg_target_std"] <= 0:
         raise ValueError("loss.sigreg_target_std must be finite and positive")
-    if config["sigreg_feature"] not in ("patch_mean", "cls", "both"):
-        raise ValueError("loss.sigreg_feature must be patch_mean, cls, or both")
+    if config["sigreg_space"] not in ("raw", "projector"):
+        raise ValueError("loss.sigreg_space must be raw or projector")
+    allowed_features = (("patch_mean", "cls", "both") if config["sigreg_space"] == "raw"
+                        else ("cls", "patch_mean", "patch_tokens", "both", "both_spatial"))
+    if config["sigreg_feature"] not in allowed_features:
+        raise ValueError("loss.sigreg_feature is invalid for the selected sigreg_space")
+    if config["lambda_sigreg"] and config["sigreg_space"] == "projector" and config["sigreg_target_std"] != 1.0:
+        raise ValueError("Projector SIGReg requires loss.sigreg_target_std=1.0 for N(0,I)")
     if type(config["sigreg_directions"]) is not int or config["sigreg_directions"] < 1:
         raise ValueError("loss.sigreg_directions must be a positive integer")
     if type(config["sigreg_knots"]) is not int or config["sigreg_knots"] < 2:
         raise ValueError("loss.sigreg_knots must be an integer >= 2")
+    for key in ("sigreg_projector_hidden_dim", "sigreg_projector_dim", "sigreg_patch_samples"):
+        if type(config[key]) is not int or config[key] < 1:
+            raise ValueError("loss." + key + " must be a positive integer")
     if config["lambda_variance"] and config["lambda_sigreg"]:
         raise ValueError("Choose either loss.lambda_variance or loss.lambda_sigreg, not both")
+    return config
+
+
+def comparable_loss_config(loss):
+    """Only active loss settings constrain exact checkpoint continuation."""
+    config = resolved_variance_config(loss)
+    if not config["lambda_variance"]:
+        for key in ("variance_target_std", "variance_feature"):
+            config.pop(key)
+    if not config["lambda_sigreg"]:
+        for key in tuple(config):
+            if key.startswith("sigreg_"):
+                config.pop(key)
+    elif config["sigreg_space"] == "raw":
+        for key in ("sigreg_projector_hidden_dim", "sigreg_projector_dim", "sigreg_patch_samples"):
+            config.pop(key)
     return config
 
 
@@ -99,15 +129,15 @@ def sigreg_loss(features, target_std, directions=256, knots=17):
     """Batch-scaled SIGReg ECF statistic against N(0, target_std^2 I).
 
     Uses the positive-half quadrature and Gaussian window from the official
-    LeJEPA minimal implementation. The fixed input scale is explicit because
-    Track A features have much smaller standard deviation than unit Gaussian.
+    LeJEPA minimal implementation. An optional leading axis holds independent
+    spatial locations, with the batch axis next to last in either case.
     """
-    if features.ndim != 2:
-        raise ValueError("SIGReg expects one vector per image")
-    if features.size(0) < 2:
+    if features.ndim not in (2, 3):
+        raise ValueError("SIGReg expects [batch, dim] or [locations, batch, dim]")
+    if features.size(-2) < 2:
         return features.sum() * 0
     x = features.float() / target_std
-    a = torch.randn(x.size(1), directions, device=x.device, dtype=x.dtype)
+    a = torch.randn(x.size(-1), directions, device=x.device, dtype=x.dtype)
     a = a / a.norm(dim=0, keepdim=True).clamp_min(1e-12)
     t = torch.linspace(0, 3, knots, device=x.device, dtype=x.dtype)
     dt = 3 / (knots - 1)
@@ -115,8 +145,21 @@ def sigreg_loss(features, target_std, directions=256, knots=17):
     weights = torch.full_like(t, 2 * dt) * window
     weights[[0, -1]] *= 0.5
     phase = (x @ a).unsqueeze(-1) * t
-    error = (phase.cos().mean(0) - window).square() + phase.sin().mean(0).square()
-    return (error @ weights).mean() * x.size(0)
+    error = (phase.cos().mean(-3) - window).square() + phase.sin().mean(-3).square()
+    return (error @ weights).mean() * x.size(-2)
+
+
+class SIGRegProjector(nn.Module):
+    """Training-time projection head; SIGReg sees its unnormalized output."""
+
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(input_dim, hidden_dim),
+                                 nn.BatchNorm1d(hidden_dim), nn.GELU(),
+                                 nn.Linear(hidden_dim, output_dim))
+
+    def forward(self, vectors):
+        return self.net(vectors)
 
 
 def gather_tokens(tokens, ids):
@@ -248,9 +291,24 @@ class RobustMAE(nn.Module):
         self.mask_ratios = resolved_mask_ratios(mask)
         selected_feature = (self.loss_cfg["variance_feature"] if self.loss_cfg["lambda_variance"]
                             else self.loss_cfg["sigreg_feature"])
-        if (self.loss_cfg["lambda_variance"] or self.loss_cfg["lambda_sigreg"]) and selected_feature in ("cls", "both"):
+        needs_cls = selected_feature in ("cls", "both", "both_spatial")
+        if (self.loss_cfg["lambda_variance"] or self.loss_cfg["lambda_sigreg"]) and needs_cls:
             if self.encoder.cls_token is None:
                 raise ValueError("CLS regularization requires model.use_cls=true")
+        self.sigreg_cls_projector = None
+        self.sigreg_patch_projector = None
+        if self.loss_cfg["lambda_sigreg"] and self.loss_cfg["sigreg_space"] == "projector":
+            if selected_feature in ("cls", "both", "both_spatial"):
+                self.sigreg_cls_projector = SIGRegProjector(
+                    self.encoder.emb_dim, self.loss_cfg["sigreg_projector_hidden_dim"],
+                    self.loss_cfg["sigreg_projector_dim"])
+            if selected_feature in ("patch_mean", "patch_tokens", "both", "both_spatial"):
+                self.sigreg_patch_projector = SIGRegProjector(
+                    self.encoder.emb_dim, self.loss_cfg["sigreg_projector_hidden_dim"],
+                    self.loss_cfg["sigreg_projector_dim"])
+            if selected_feature in ("patch_tokens", "both_spatial"):
+                if self.loss_cfg["sigreg_patch_samples"] > self.encoder.num_patches:
+                    raise ValueError("loss.sigreg_patch_samples exceeds the encoder patch count")
 
     def target(self, images):
         target = patchify(images, self.encoder.patch_size)
@@ -317,25 +375,51 @@ class RobustMAE(nn.Module):
             terms = []
             kind = "variance" if self.loss_cfg["lambda_variance"] else "sigreg"
             feature = self.loss_cfg[kind + "_feature"]
+            projector_mode = kind == "sigreg" and self.loss_cfg["sigreg_space"] == "projector"
 
-            def regularize(v):
+            def regularize(v, name, projector=None):
+                logs["latent/std_raw_full_clean_" + name] = v.float().std(dim=0, unbiased=False).mean()
                 if kind == "variance":
-                    return variance_hinge(v, self.loss_cfg["variance_target_std"])
-                value = sigreg_loss(v, self.loss_cfg["sigreg_target_std"],
+                    value, std = variance_hinge(v, self.loss_cfg["variance_target_std"])
+                    logs["latent/std_full_clean_" + name] = std
+                    return value
+                logs["latent/std_full_clean_" + name] = (
+                    v.float().var(dim=0, unbiased=False) + 1e-4).sqrt().mean()
+                projected = projector(v) if projector is not None else v
+                value = sigreg_loss(projected, self.loss_cfg["sigreg_target_std"],
                                     self.loss_cfg["sigreg_directions"], self.loss_cfg["sigreg_knots"])
-                std = (v.float().var(dim=0, unbiased=False) + 1e-4).sqrt().mean()
-                return value, std
+                if projector is not None:
+                    logs["latent/std_projected_" + name] = projected.float().std(dim=0, unbiased=False).mean()
+                return value
 
             if feature in ("patch_mean", "both"):
-                value, std = regularize(full["patch_tokens"].mean(1))
+                value = regularize(full["patch_tokens"].mean(1), "patch_mean",
+                                   self.sigreg_patch_projector if projector_mode else None)
                 terms.append(value)
                 logs["loss/" + kind + "_patch_mean"] = value
-                logs["latent/std_full_clean_patch_mean"] = std
-            if feature in ("cls", "both"):
-                value, std = regularize(full["cls_token"])
+            if feature in ("cls", "both", "both_spatial"):
+                value = regularize(full["cls_token"], "cls",
+                                   self.sigreg_cls_projector if projector_mode else None)
                 terms.append(value)
                 logs["loss/" + kind + "_cls"] = value
-                logs["latent/std_full_clean_cls"] = std
+            if feature in ("patch_tokens", "both_spatial"):
+                # The same spatial positions are sampled for every image; a
+                # fixed position embedding alone cannot satisfy each batch test.
+                count = self.loss_cfg["sigreg_patch_samples"]
+                indices = torch.randperm(self.encoder.num_patches,
+                                         device=full["patch_tokens"].device,
+                                         generator=generator)[:count]
+                selected = full["patch_tokens"][:, indices]
+                batch_size, _, dim = selected.shape
+                projected = self.sigreg_patch_projector(selected.reshape(batch_size * count, dim))
+                projected = projected.reshape(batch_size, count, -1).transpose(0, 1)
+                value = sigreg_loss(projected, self.loss_cfg["sigreg_target_std"],
+                                    self.loss_cfg["sigreg_directions"], self.loss_cfg["sigreg_knots"])
+                terms.append(value)
+                logs["loss/sigreg_patch_tokens"] = value
+                logs["sigreg/patch_samples"] = value.new_tensor(count)
+                logs["latent/std_raw_full_clean_patch_tokens"] = selected.float().std(dim=0, unbiased=False).mean()
+                logs["latent/std_projected_patch_tokens"] = projected.float().std(dim=1, unbiased=False).mean()
             regularizer_loss = torch.stack(terms).mean()
             weighted = self.loss_cfg["lambda_" + kind] * regularizer_loss
             total = total + weighted

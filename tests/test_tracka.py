@@ -236,19 +236,30 @@ def test_sigreg_statistic_and_validation(cfg):
     sigreg_loss(features, .1, directions=8, knots=5).backward()
     assert features.grad.abs().sum() > 0
     assert sigreg_loss(features[:1], .1) == 0
-    with pytest.raises(ValueError, match="one vector per image"):
-        sigreg_loss(features[:, None], .1)
+    torch.manual_seed(11)
+    locationwise = sigreg_loss(projection_batch.unsqueeze(0).repeat(2, 1, 1), .1,
+                              directions=8, knots=5)
+    assert torch.allclose(locationwise, original, rtol=1e-5)
+    with pytest.raises(ValueError, match="locations, batch"):
+        sigreg_loss(features[:, None, None], .1)
     with pytest.raises(ValueError, match="either"):
         resolved_variance_config({**cfg["loss"], "lambda_variance": .1, "lambda_sigreg": .001})
     with pytest.raises(ValueError, match="positive integer"):
         resolved_variance_config({**cfg["loss"], "sigreg_directions": 0})
+    with pytest.raises(ValueError, match="target_std=1.0"):
+        resolved_variance_config({**cfg["loss"], "lambda_sigreg": .001,
+                                  "sigreg_target_std": .1})
+    legacy = dict(cfg["loss"])
+    legacy.update(lambda_sigreg=.001, sigreg_feature="both", sigreg_target_std=.1)
+    legacy.pop("sigreg_space")
+    assert resolved_variance_config(legacy)["sigreg_space"] == "raw"
 
 
 def test_sigreg_objective_full_clean_and_gradients(cfg, monkeypatch):
     import tracka.model as model_module
 
     cfg["model"]["use_cls"] = True
-    cfg["loss"].update(lambda_sigreg=.001, sigreg_target_std=.1,
+    cfg["loss"].update(lambda_sigreg=.001, sigreg_space="raw", sigreg_target_std=.1,
                        sigreg_feature="both", sigreg_directions=8, sigreg_knots=5)
     model = RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
     observed = []
@@ -270,6 +281,35 @@ def test_sigreg_objective_full_clean_and_gradients(cfg, monkeypatch):
     cfg["model"]["use_cls"] = False
     with pytest.raises(ValueError, match="requires model.use_cls=true"):
         RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
+
+
+@pytest.mark.parametrize("feature", ["cls", "patch_tokens", "both_spatial"])
+@pytest.mark.parametrize("mode", ["render_only", "corruption_only"])
+def test_projected_sigreg_objective(cfg, feature, mode):
+    cfg["model"]["use_cls"] = True
+    cfg["loss"].update(lambda_sigreg=.001, sigreg_feature=feature,
+                       sigreg_projector_hidden_dim=16, sigreg_projector_dim=8,
+                       sigreg_patch_samples=3, sigreg_directions=8, sigreg_knots=5)
+    model = RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
+    loss, logs = model.objective(random_batch(cfg), mode)
+    assert torch.isfinite(loss) and logs["loss/sigreg"] > 0
+    assert ("loss/sigreg_cls" in logs) == (feature in ("cls", "both_spatial"))
+    assert ("loss/sigreg_patch_tokens" in logs) == (feature in ("patch_tokens", "both_spatial"))
+    if feature in ("patch_tokens", "both_spatial"):
+        assert logs["sigreg/patch_samples"] == 3
+        assert "latent/std_projected_patch_tokens" in logs
+    assert torch.allclose(logs["loss/weighted_sigreg"], .001 * logs["loss/sigreg"])
+    model.zero_grad()
+    logs["loss/sigreg"].backward()
+    assert model.encoder.patch_embed.weight.grad.abs().sum() > 0
+    if feature in ("cls", "both_spatial"):
+        assert model.sigreg_cls_projector.net[0].weight.grad.abs().sum() > 0
+    if feature in ("patch_tokens", "both_spatial"):
+        assert model.sigreg_patch_projector.net[0].weight.grad.abs().sum() > 0
+    cfg["loss"]["sigreg_patch_samples"] = 17
+    if feature in ("patch_tokens", "both_spatial"):
+        with pytest.raises(ValueError, match="exceeds"):
+            RobustMAE(cfg["model"], cfg["decoder"], cfg["loss"], cfg["mask"])
 
 
 def test_colors_reset_and_wrapped_angle(cfg):
@@ -380,19 +420,56 @@ def test_variance_training_smoke(generated, tmp_path):
 def test_sigreg_training_smoke_and_resume_guard(generated, tmp_path):
     cfg = generated
     cfg["model"]["use_cls"] = True
-    cfg["loss"].update(lambda_sigreg=.001, sigreg_feature="both",
-                       sigreg_directions=8, sigreg_knots=5)
+    cfg["loss"].update(lambda_sigreg=.001, sigreg_feature="both_spatial",
+                       sigreg_directions=8, sigreg_knots=5,
+                       sigreg_projector_hidden_dim=16, sigreg_projector_dim=8,
+                       sigreg_patch_samples=2)
     cfg["training"].update(objective="robust_alternating", output_dir=str(tmp_path / "sigreg"))
     out = train(cfg)
     records = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
     updates = [r for r in records if "loss/weighted_sigreg" in r]
     assert len(updates) == 2
-    assert all("loss/sigreg_cls" in r and "loss/sigreg_patch_mean" in r for r in updates)
-    assert load_checkpoint(out / "checkpoint_latest.pt")["config"]["loss"]["lambda_sigreg"] == .001
+    assert all("loss/sigreg_cls" in r and "loss/sigreg_patch_tokens" in r for r in updates)
+    saved = load_checkpoint(out / "checkpoint_latest.pt")
+    assert saved["config"]["loss"]["lambda_sigreg"] == .001
+    assert set(saved["sigreg_projectors"]) == {"sigreg_cls_projector", "sigreg_patch_projector"}
+    from models.tracka_patch import TrackAPatchEncoder
+    frozen = TrackAPatchEncoder(str((out / "checkpoint_latest.pt").resolve()), expected_step=2)
+    assert frozen(torch.randn(1, 3, 32, 32)).shape == (1, 16, 24)
     cfg["training"].update(total_optimizer_updates=4, resume=str(out / "checkpoint_latest.pt"))
-    cfg["loss"]["sigreg_target_std"] = .2
+    cfg["loss"]["sigreg_projector_dim"] = 9
     with pytest.raises(ValueError, match="Resume configuration differs: loss"):
         train(cfg)
+    cfg["loss"]["sigreg_projector_dim"] = 8
+    train(cfg)
+    resumed = load_checkpoint(out / "checkpoint_latest.pt")
+    cfg["training"].update(output_dir=str(tmp_path / "sigreg_uninterrupted"), resume=None)
+    uninterrupted = load_checkpoint(train(cfg) / "checkpoint_latest.pt")
+    for name in ("encoder", "decoder"):
+        for key, value in uninterrupted[name].items():
+            assert torch.equal(value, resumed[name][key]), name + ":" + key
+    for name in uninterrupted["sigreg_projectors"]:
+        for key, value in uninterrupted["sigreg_projectors"][name].items():
+            assert torch.equal(value, resumed["sigreg_projectors"][name][key]), name + ":" + key
+
+
+def test_legacy_raw_sigreg_checkpoint_resume(generated, tmp_path):
+    cfg = generated
+    cfg["model"]["use_cls"] = True
+    cfg["loss"].update(lambda_sigreg=.001, sigreg_space="raw", sigreg_target_std=.1,
+                       sigreg_feature="both", sigreg_directions=8, sigreg_knots=5)
+    cfg["training"].update(objective="robust_alternating", output_dir=str(tmp_path / "legacy_raw"))
+    out = train(cfg)
+    legacy = load_checkpoint(out / "checkpoint_latest.pt")
+    for key in ("sigreg_space", "sigreg_projector_hidden_dim", "sigreg_projector_dim",
+                "sigreg_patch_samples"):
+        legacy["config"]["loss"].pop(key)
+    legacy.pop("sigreg_projectors")
+    legacy_path = out / "pre_projector_schema.pt"
+    torch.save(legacy, legacy_path)
+    cfg["training"].update(total_optimizer_updates=4, resume=str(legacy_path))
+    train(cfg)
+    assert load_checkpoint(out / "checkpoint_latest.pt")["global_step"] == 4
 
 
 def test_linear_probe_toy():
