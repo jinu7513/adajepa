@@ -81,12 +81,16 @@ Run tests and a two-update smoke before a longer job:
 
 ```bash
 python -m pytest tests/test_tracka_event.py -q
-python train_event_encoder.py --config-name tracka_event \
-  dataset.output_path=data/event_windows training.total_optimizer_updates=2 \
-  training.batch_size=2 training.rank_samples=8 training.validation_batches=1 \
-  training.validate_every=2 training.save_every=2 logging.log_every=1 \
-  logging.name=trackA-event-fixed-sum-smoke logging.fallback_to_local=false
+python run_event_smoke.py
 ```
+
+`run_event_smoke.py` requires a finished dataset, verifies manifest/report counts,
+all referenced image files and nonempty train/validation/test splits, then runs
+exactly two optimizer updates. It stops on failed W&B logging, checks the saved
+checkpoint and step-2 metrics, and prints the output directory and W&B run URL.
+Use `python run_event_smoke.py --check-only` to inspect the dataset without
+training, or `--dataset /absolute/path/to/event_windows` for a different output
+path. It never starts a full training run.
 
 Training writes `metrics.jsonl`, `checkpoint_latest.pt`, config/provenance, and
 W&B in project `adajepa_trackA_event`. `train/global_step` is the W&B x-axis.
