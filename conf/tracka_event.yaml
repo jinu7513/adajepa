@@ -89,4 +89,3 @@ evaluation:
   salt_pepper_grid: [0.02]
   blur_grid: [0.6, 1.2]
   dark_grid: [0.5]
-  dark_grid: [0.5]
