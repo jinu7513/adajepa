@@ -258,6 +258,14 @@ This requires the complete PushT trajectory dataset, including actions and
 videos; the four-view encoder pairs alone cannot train an action-conditioned
 predictor. The released DINO predictor is not reused unchanged.
 
+The separate [trajectory-contiguous RGB + Event-proxy encoder experiment](docs/tracka_event.md)
+trains without RGB reconstruction or masking. It uses adjacent original PushT
+frames, an EMA clean teacher, same-time patch predictor and action-free next-step
+CLS predictor. Generate and inspect Event-window contact sheets before training;
+its new checkpoints require `eval_event_encoder.py`, not the single-frame Track A
+probe or current MPC planner. See the guide for exact preview, smoke, W&B and
+frozen-probe commands and fairness controls.
+
 The aggregator rejects incompatible dataset/evaluation protocols and reports means
 and sample standard deviations across distinct training seeds; it does not compute
 confidence intervals. For random-scratch and frozen-DINO references, resume/recovery,

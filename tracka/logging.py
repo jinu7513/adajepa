@@ -48,7 +48,8 @@ class RunLogger:
                 kwargs.update(id=self.resume_id, resume="must")
             self.run = wandb.init(**kwargs)
             self.run.define_metric("train/global_step")
-            for namespace in ("clean/*", "render/*", "corruption/*", "latent/*", "loss/*", "mask/*", "val/*", "train/*", "images/*"):
+            for namespace in ("clean/*", "render/*", "corruption/*", "latent/*", "loss/*", "mask/*", "val/*", "train/*", "images/*",
+                              "event/*", "gate/*", "temporal/*", "probe/*", "collapse/*", "teacher/*"):
                 self.run.define_metric(namespace, step_metric="train/global_step")
             write_json(self.folder / "wandb_identity.json", {"id": self.run.id,
                        "project": self.cfg["project"], "entity": self.run.entity,

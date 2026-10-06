@@ -1,0 +1,92 @@
+defaults:
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: tracka_outputs/hydra_event/${now:%Y%m%d_%H%M%S}
+
+model:
+  image_size: 224
+  patch_size: 16
+  embed_dim: 384
+  heads: 6
+  rgb_depth: 1
+  event_depth: 1
+  shared_depth: 5
+  event_mode: hard_two_channel  # hard_signed | hard_two_channel | delta_log | soft_clipped
+  event_threshold: 0.2  # Provisional; inspect preview/density before full training.
+  event_eps: 0.001
+  shift_previous: false
+  fusion: fixed_sum  # rgb_only | event_only | fixed_sum | gated_sum
+  global_representation: cls  # cls | mean_pool
+  rgb_input_mode: current  # pair only for rgb_only two-frame control
+
+dataset:
+  source_pairs_path: data/pairs
+  output_path: data/event_windows
+  shift_seed: 31
+  shift_kinds: [colorA, colorB, gaussian, salt_pepper, blur]
+  corruption_strength:
+    gaussian: [1.0, 8.0]
+    salt_pepper: [0.001, 0.02]
+    blur: [0.3, 1.2]
+
+generation:
+  preview_only: true
+  preview_windows: 8
+  ranges_reviewed: false
+
+loss:
+  lambda_rob: 1.0
+  lambda_temp: 1.0
+  distance: cosine  # cosine | normalized_mse | mse
+  anti_collapse: none  # none | sigreg | vicreg
+  lambda_ac: 0.0
+  sigreg_hidden_dim: 512
+  sigreg_dim: 128
+  sigreg_directions: 256
+  sigreg_knots: 17
+
+training:
+  total_optimizer_updates: 10000
+  batch_size: 16
+  seed: 0
+  lr: 0.0001
+  weight_decay: 0.05
+  ema_momentum: 0.996
+  device: auto
+  cpu_threads: 4
+  grad_clip: 1.0
+  validate_every: 100
+  validation_batches: 4
+  rank_samples: 256
+  save_every: 100
+  output_dir: null
+  resume: null
+
+logging:
+  mode: online
+  project: adajepa_trackA_event
+  entity: null
+  name: null
+  group: null
+  log_every: 10
+  fallback_to_local: true
+
+evaluation:
+  checkpoint: null
+  output_dir: null
+  device: auto
+  batch_size: 32
+  seed: 100
+  max_states_per_split: null
+  weights: student  # student | teacher
+  feature: global  # global | patch_mean
+  ridge_alphas: [0.001, 0.01, 0.1, 1.0, 10.0]
+  gaussian_grid: [8.0]
+  salt_pepper_grid: [0.02]
+  blur_grid: [0.6, 1.2]
+  dark_grid: [0.5]
+  dark_grid: [0.5]
