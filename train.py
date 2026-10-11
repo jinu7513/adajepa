@@ -30,8 +30,11 @@ log = logging.getLogger(__name__)
 
 
 def validate_tracka_predictor_inputs(cfg):
-    """Fail before W&B initialization when the patch-token recipe is incomplete."""
-    if cfg.encoder.get("_target_") != "models.tracka_patch.TrackAPatchEncoder":
+    """Fail before W&B initialization when a Track A recipe is incomplete."""
+    target = cfg.encoder.get("_target_")
+    event_encoder = target == "models.tracka_event_patch.TrackAEventPatchEncoder"
+    if target not in ("models.tracka_patch.TrackAPatchEncoder",
+                      "models.tracka_event_patch.TrackAEventPatchEncoder"):
         return
     if cfg.env.name != "pusht":
         raise ValueError("Track A patch predictor recipe currently supports env=pusht only")
@@ -43,9 +46,27 @@ def validate_tracka_predictor_inputs(cfg):
         raise ValueError("Set training.save_frozen_encoder=true to make planning checkpoints self-contained")
     encoder_path = Path(cfg.encoder.checkpoint_path)
     if not encoder_path.is_absolute():
-        raise ValueError("TRACKA_ENCODER_CKPT must be an absolute path")
+        raise ValueError("Track A encoder checkpoint path must be absolute")
     if not encoder_path.is_file():
         raise FileNotFoundError(f"Track A encoder checkpoint not found: {encoder_path}")
+    if event_encoder:
+        if not cfg.env.dataset.get("include_previous_frames", False):
+            raise ValueError("Event predictor requires env.dataset.include_previous_frames=true")
+        from tracka.common import load_checkpoint
+        checkpoint = load_checkpoint(encoder_path)
+        if checkpoint.get("schema_version") != "tracka-event-v1":
+            raise ValueError("Event predictor requires a tracka-event-v1 checkpoint")
+        expected_step = cfg.encoder.get("expected_step")
+        if expected_step is not None and checkpoint.get("global_step") != expected_step:
+            raise ValueError(f"Expected Event step {expected_step}, got {checkpoint.get('global_step')}")
+        expected_hash = cfg.encoder.get("expected_sha256")
+        if expected_hash is not None:
+            from tracka.common import file_hash
+            if file_hash(encoder_path) != expected_hash:
+                raise ValueError("Event checkpoint SHA-256 mismatch")
+        model_cfg = checkpoint["config"]["model"]
+        if model_cfg["image_size"] != cfg.img_size or model_cfg["patch_size"] != 16:
+            raise ValueError("Event image size and 16-pixel patch grid must match PushT predictor")
     data_root = Path(cfg.env.dataset.data_path)
     if not data_root.is_absolute():
         raise ValueError("DATASET_DIR must resolve to an absolute path")
@@ -362,7 +383,7 @@ class Trainer:
             decoder_scale = 16  # from vqvae
             num_side_patches = self.cfg.img_size // decoder_scale
             num_patches = getattr(self.encoder, "num_patches", num_side_patches**2)
-            if getattr(self.encoder, "name", None) == "tracka_patch":
+            if getattr(self.encoder, "name", None) in ("tracka_patch", "tracka_event_patch"):
                 if self.encoder.image_size != self.cfg.img_size or num_patches != num_side_patches**2:
                     raise ValueError("Track A image size/patch grid must match the PushT predictor configuration")
 

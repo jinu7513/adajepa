@@ -1,0 +1,4 @@
+_target_: models.tracka_event_patch.TrackAEventPatchEncoder
+checkpoint_path: ${oc.env:TRACKA_EVENT_ENCODER_CKPT}
+expected_step: 10000
+expected_sha256: null

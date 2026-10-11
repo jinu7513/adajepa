@@ -135,6 +135,10 @@ The shape and maze checkpoints ship the VQVAE decoder that was co-trained with t
 
 ## Track A: Scratch Robust Visual Encoder
 
+The separate RGB/Event-proxy encoder can now train a frozen patch-token PushT
+predictor; see [docs/tracka_event_predictor.md](docs/tracka_event_predictor.md).
+This is a training integration, not yet an MPC/planning integration.
+
 Track A is a separate **representation-learning experiment**, not a modification of
 AdaJEPA's MPC planner or its test-time adaptation algorithm. It trains a PushT visual
 encoder from random initialization with masked reconstruction, same-state color

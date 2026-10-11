@@ -2,7 +2,8 @@
 
 This is a **separate, reconstruction-free experiment** on the
 `rgb-event-robust-encoder` branch. It does not alter the existing Track A MAE
-encoder, predictor, or MPC planner. The event maps are **proxies derived from two
+encoder or MPC planner. A separate frozen-Event predictor training adapter is
+documented in [tracka_event_predictor.md](tracka_event_predictor.md). The event maps are **proxies derived from two
 RGB frames**, not asynchronous recordings from an event camera. The model is
 trained from scratch; its teacher is an EMA copy of its student, not DINO.
 
@@ -152,8 +153,9 @@ measurements. A low self-supervised loss, event density or effective rank
 alone is not evidence of better state or
 control information. Because `F` has no action input, future-latent error is
 **action-free predictive representation learning**, not an action-conditioned
-world model. Direct MPC success-rate testing needs a separate previous-frame
-input adapter and predictor/planner integration, intentionally not included.
+world model. The separate adapter can train an action-conditioned predictor
+from full PushT trajectories. Direct MPC success-rate testing still needs
+previous-frame inputs from the environment and planner integration.
 Patch-wise alignment averages foreground and background equally, so a small
 `loss/robust` can still be obtained largely from static background/position
 structure. Judge dynamics relevance with the state probe and the persistence

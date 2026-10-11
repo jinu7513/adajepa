@@ -28,6 +28,7 @@ class PushTDataset(TrajDataset):
         relative=True,
         action_scale=100.0,
         with_velocity: bool = True, # agent's velocity
+        include_previous_frames: bool = False,
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
@@ -66,6 +67,7 @@ class PushTDataset(TrajDataset):
         self.proprios = self.states[..., :2].clone()  # For pusht, first 2 dim of states is proprio
         # load velocities and update states and proprios
         self.with_velocity = with_velocity
+        self.include_previous_frames = include_previous_frames
         if with_velocity:
             self.velocities = torch.load(self.data_path / "velocities.pth")
             self.velocities = self.velocities[:n].float()
@@ -106,6 +108,7 @@ class PushTDataset(TrajDataset):
         return torch.cat(result, dim=0)
 
     def get_frames(self, idx, frames):
+        frames = list(frames)
         vid_dir = self.data_path / "obses"
         reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
         act = self.actions[idx, frames]
@@ -119,6 +122,12 @@ class PushTDataset(TrajDataset):
         if self.transform:
             image = self.transform(image)
         obs = {"visual": image, "proprio": proprio}
+        if self.include_previous_frames:
+            previous = reader.get_batch([max(0, frame - 1) for frame in frames]) / 255.0
+            previous = rearrange(previous, "T H W C -> T C H W")
+            if self.transform:
+                previous = self.transform(previous)
+            obs["visual_previous"] = previous
         return obs, act, state, {'shape': shape}
 
     def __getitem__(self, idx):
@@ -144,6 +153,7 @@ def load_pusht_slice_train_val(
     num_pred=0,
     frameskip=0,
     with_velocity=True,
+    include_previous_frames=False,
 ):
     train_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -151,6 +161,7 @@ def load_pusht_slice_train_val(
         data_path=data_path + "/train",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        include_previous_frames=include_previous_frames,
     )
     val_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -158,6 +169,7 @@ def load_pusht_slice_train_val(
         data_path=data_path + "/val",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        include_previous_frames=include_previous_frames,
     )
 
     num_frames = num_hist + num_pred

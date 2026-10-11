@@ -108,6 +108,13 @@ class TrajSlicerDataset(TrajDataset):
             obs = {"visual": visual, "proprio": proprio}
             state = ds.states[i, frame_idx]
             act = ds.actions[i, start:end]
+        elif hasattr(ds, "get_frames") and getattr(ds, "include_previous_frames", False):
+            # Event inputs need frame t-1, not the preceding frame in the
+            # frameskip-sampled window. Read only sampled frames; keep every
+            # action in the interval for the existing action concatenation.
+            frame_idx = list(range(start, end, self.frameskip))
+            obs, _, state, _ = ds.get_frames(i, frame_idx)
+            act = ds.actions[i, start:end]
         elif hasattr(ds, "get_frames"):
             obs, act, state, _ = ds.get_frames(i, range(start, end))
             for k, v in obs.items():

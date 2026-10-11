@@ -175,10 +175,16 @@ class VWorldModel(nn.Module):
         """
         visual = obs['visual']
         b = visual.shape[0]
-        visual = rearrange(visual, "b t ... -> (b t) ...")
-        visual = self.encoder_transform(visual)
-        visual_embs = self.encoder.forward(visual)
-        visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
+        if getattr(self.encoder, "requires_previous_frame", False):
+            previous = obs.get("visual_previous")
+            if previous is None:
+                raise ValueError("Event encoder requires obs['visual_previous'] with actual preceding video frames")
+            visual_embs = self.encoder.forward_sequence(previous, visual)
+        else:
+            visual = rearrange(visual, "b t ... -> (b t) ...")
+            visual = self.encoder_transform(visual)
+            visual_embs = self.encoder.forward(visual)
+            visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
 
         proprio = obs['proprio']
         proprio_emb = self.encode_proprio(proprio)
