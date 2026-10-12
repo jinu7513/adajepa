@@ -57,22 +57,42 @@ class TrajSlicerDataset(TrajDataset):
         num_frames: int,
         frameskip: int = 1,
         process_actions: str = "concat",
+        window_block_size: int = 1,
     ):
+        if window_block_size < 1:
+            raise ValueError("window_block_size must be positive")
         self.dataset = dataset
         self.num_frames = num_frames
         self.frameskip = frameskip
         self.slices = []
+        blocks = [] if window_block_size > 1 else None
         for i in range(len(self.dataset)): 
             T = self.dataset.get_seq_length(i)
             if T - num_frames < 0:
                 print(f"Ignored short sequence #{i}: len={T}, num_frames={num_frames}")
             else:
-                self.slices += [
-                    (i, start, start + num_frames * self.frameskip)
-                    for start in range(T - num_frames * frameskip + 1)
-                ]  # slice indices follow convention [start, end)
-        # randomly permute the slices
-        self.slices = np.random.permutation(self.slices)
+                num_starts = T - num_frames * frameskip + 1
+                if blocks is None:
+                    self.slices.extend(
+                        (i, start, start + num_frames * self.frameskip)
+                        for start in range(num_starts)
+                    )
+                else:
+                    blocks.extend(
+                        [(i, start, start + num_frames * self.frameskip)
+                         for start in range(block_start, min(block_start + window_block_size, num_starts))]
+                        for block_start in range(0, num_starts, window_block_size)
+                    )
+        # Group nearby windows only when explicitly requested. This changes
+        # within-batch correlations, so keep global window shuffling by default.
+        if blocks is None:
+            self.slices = np.random.permutation(self.slices)
+        else:
+            self.slices = np.asarray(
+                [window for block_index in np.random.permutation(len(blocks))
+                 for window in blocks[block_index]],
+                dtype=np.int64,
+            ).reshape(-1, 3)
         
         self.proprio_dim = self.dataset.proprio_dim
         if process_actions == "concat":

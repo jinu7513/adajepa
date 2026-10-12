@@ -1,7 +1,9 @@
 import torch
 import decord
 import pickle
+import os
 import numpy as np
+from collections import OrderedDict
 from pathlib import Path
 from einops import rearrange
 from decord import VideoReader
@@ -29,6 +31,8 @@ class PushTDataset(TrajDataset):
         action_scale=100.0,
         with_velocity: bool = True, # agent's velocity
         include_previous_frames: bool = False,
+        video_reader_cache_size: int = 0,
+        merge_video_reads: bool = False,
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
@@ -68,6 +72,13 @@ class PushTDataset(TrajDataset):
         # load velocities and update states and proprios
         self.with_velocity = with_velocity
         self.include_previous_frames = include_previous_frames
+        if video_reader_cache_size < 0:
+            raise ValueError("video_reader_cache_size must be nonnegative")
+        self.video_reader_cache_size = video_reader_cache_size
+        self.merge_video_reads = merge_video_reads
+        # DataLoader workers must never share an open decoder across processes.
+        self._video_reader_pid = os.getpid()
+        self._video_reader_cache = OrderedDict()
         if with_velocity:
             self.velocities = torch.load(self.data_path / "velocities.pth")
             self.velocities = self.velocities[:n].float()
@@ -107,23 +118,59 @@ class PushTDataset(TrajDataset):
             result.append(self.actions[i, :T, :])
         return torch.cat(result, dim=0)
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_video_reader_cache"] = OrderedDict()
+        state["_video_reader_pid"] = None
+        return state
+
+    def _get_video_reader(self, idx):
+        cache_size = getattr(self, "video_reader_cache_size", 0)
+        path = self.data_path / "obses" / f"episode_{idx:03d}.mp4"
+        if not cache_size:
+            return VideoReader(str(path), num_threads=1)
+        pid = os.getpid()
+        if getattr(self, "_video_reader_pid", None) != pid:
+            self._video_reader_cache = OrderedDict()
+            self._video_reader_pid = pid
+        cache = self._video_reader_cache
+        if idx in cache:
+            cache.move_to_end(idx)
+            return cache[idx]
+        reader = VideoReader(str(path), num_threads=1)
+        cache[idx] = reader
+        if len(cache) > cache_size:
+            cache.popitem(last=False)
+        return reader
+
     def get_frames(self, idx, frames):
         frames = list(frames)
-        vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
+        reader = self._get_video_reader(idx)
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
         proprio = self.proprios[idx, frames]
         shape = self.shapes[idx]
 
-        image = reader.get_batch(frames)  # THWC
+        previous_frames = [max(0, frame - 1) for frame in frames]
+        if self.include_previous_frames and getattr(self, "merge_video_reads", False):
+            # Decode each requested frame at most once, in temporal order.
+            requested = sorted(set(frames + previous_frames))
+            positions = {frame: position for position, frame in enumerate(requested)}
+            decoded = reader.get_batch(requested)
+            image = decoded[[positions[frame] for frame in frames]]
+            previous_image = decoded[[positions[frame] for frame in previous_frames]]
+        else:
+            image = reader.get_batch(frames)  # THWC
+            previous_image = None
         image = image / 255.0
         image = rearrange(image, "T H W C -> T C H W")
         if self.transform:
             image = self.transform(image)
         obs = {"visual": image, "proprio": proprio}
         if self.include_previous_frames:
-            previous = reader.get_batch([max(0, frame - 1) for frame in frames]) / 255.0
+            if previous_image is None:
+                previous_image = reader.get_batch(previous_frames)
+            previous = previous_image / 255.0
             previous = rearrange(previous, "T H W C -> T C H W")
             if self.transform:
                 previous = self.transform(previous)
@@ -154,6 +201,9 @@ def load_pusht_slice_train_val(
     frameskip=0,
     with_velocity=True,
     include_previous_frames=False,
+    video_reader_cache_size=0,
+    merge_video_reads=False,
+    window_block_size=1,
 ):
     train_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -162,6 +212,8 @@ def load_pusht_slice_train_val(
         normalize_action=normalize_action,
         with_velocity=with_velocity,
         include_previous_frames=include_previous_frames,
+        video_reader_cache_size=video_reader_cache_size,
+        merge_video_reads=merge_video_reads,
     )
     val_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -170,11 +222,13 @@ def load_pusht_slice_train_val(
         normalize_action=normalize_action,
         with_velocity=with_velocity,
         include_previous_frames=include_previous_frames,
+        video_reader_cache_size=video_reader_cache_size,
+        merge_video_reads=merge_video_reads,
     )
 
     num_frames = num_hist + num_pred
-    train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)
-    val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip)
+    train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip, window_block_size=window_block_size)
+    val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip, window_block_size=window_block_size)
 
     datasets = {}
     datasets["train"] = train_slices
