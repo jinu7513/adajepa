@@ -12,6 +12,17 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/home/j/jinwoo/miniforge3/envs/ts/bin/python}"
 DATASET_DIR="${DATASET_DIR:-$REPO_DIR/data_full}"
 BENCH_N_ROLLOUT="${BENCH_N_ROLLOUT:-8}"
+BENCH_ONLY_CASE="${BENCH_ONLY_CASE:-}"
+
+case "$BENCH_ONLY_CASE" in
+  '') CASE_SPECS=('b8_w1:8:1' 'b16_w1:16:1' 'b32_w1:32:1' 'b32_w2:32:2') ;;
+  b8_w1) CASE_SPECS=('b8_w1:8:1') ;;
+  b16_w1) CASE_SPECS=('b16_w1:16:1') ;;
+  b32_w1) CASE_SPECS=('b32_w1:32:1') ;;
+  b32_w2) CASE_SPECS=('b32_w2:32:2') ;;
+  b128_w4) CASE_SPECS=('b128_w4:128:4') ;;
+  *) echo "Unknown BENCH_ONLY_CASE: $BENCH_ONLY_CASE" >&2; exit 2 ;;
+esac
 
 if [ ! -x "$PYTHON_BIN" ] || [ ! -f "$1" ]; then
   echo "Missing executable Python or Event checkpoint: $PYTHON_BIN / $1" >&2
@@ -53,7 +64,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # Same data, model, precision and optimizer settings; only batch/workers change.
-for case_spec in 'b8_w1:8:1' 'b16_w1:16:1' 'b32_w1:32:1' 'b32_w2:32:2'; do
+for case_spec in "${CASE_SPECS[@]}"; do
   IFS=: read -r case_name batch_size num_workers <<< "$case_spec"
   RUN_DIR="$BENCH_ROOT/$case_name"
   mkdir "$RUN_DIR"
