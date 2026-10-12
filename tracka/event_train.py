@@ -32,6 +32,26 @@ def active_encoder_parameters(encoder):
         p.numel() for module in modules for p in module.parameters())
 
 
+def resume_destination(checkpoint, training_cfg):
+    """Choose an in-place resume or a clean fork without rewriting old metrics."""
+    source = Path(checkpoint["output_dir"]).resolve()
+    requested = training_cfg.get("output_dir")
+    if training_cfg.get("fork_from_checkpoint", False):
+        if not requested:
+            raise ValueError("Forking requires a fresh training.output_dir")
+        destination = Path(requested).resolve()
+        if destination == source or (destination.exists() and any(destination.iterdir())):
+            raise FileExistsError("Fork output directory must be new and empty")
+        return destination, None, str(Path(training_cfg["resume"]).resolve())
+    if requested and Path(requested).resolve() != source:
+        raise ValueError("Resume must use its original output directory")
+    log_file = source / "metrics.jsonl"
+    if log_file.exists() and max((json.loads(line).get("train/global_step", 0)
+                                  for line in log_file.read_text().splitlines()), default=0) > checkpoint["global_step"]:
+        raise ValueError("Checkpoint is older than durable metrics")
+    return source, checkpoint.get("wandb_run_id"), None
+
+
 def spectrum_metrics(features, prefix):
     """Effective rank on an evaluation *collection*, not one small minibatch."""
     x = torch.cat(features).double().cpu()
@@ -135,7 +155,7 @@ def train_event_encoder(cfg):
         trainable += list(model.sigreg_projector.parameters())
     optimizer = torch.optim.AdamW(trainable, lr=tc["lr"], weight_decay=tc["weight_decay"])
     checkpoint = load_checkpoint(absolute(tc["resume"])) if tc["resume"] else None
-    step, draws, resume_id = 0, 0, None
+    step, draws, resume_id, fork_source = 0, 0, None, None
     if checkpoint is not None:
         if checkpoint.get("schema_version") != "tracka-event-v1" or checkpoint["manifest_sha256"] != manifest_hash:
             raise ValueError("Resume checkpoint schema or dataset differs")
@@ -150,15 +170,12 @@ def train_event_encoder(cfg):
                 raise ValueError("Resume W&B project/entity differs")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        step, draws, resume_id = (checkpoint["global_step"], checkpoint["samples_drawn"],
-                                  checkpoint.get("wandb_run_id"))
-        out = Path(checkpoint["output_dir"])
-        if tc["output_dir"] and Path(tc["output_dir"]).resolve() != out:
-            raise ValueError("Resume must use its original output directory")
-        log_file = out / "metrics.jsonl"
-        if log_file.exists() and max((json.loads(s).get("train/global_step", 0)
-                                      for s in log_file.read_text().splitlines()), default=0) > step:
-            raise ValueError("Checkpoint is older than durable metrics")
+        step, draws = checkpoint["global_step"], checkpoint["samples_drawn"]
+        out, resume_id, fork_source = resume_destination(checkpoint, tc)
+        # A fork is a one-time choice; its saved checkpoint must subsequently
+        # resume in place instead of trying to create another fork.
+        if fork_source is not None:
+            tc["fork_from_checkpoint"] = False
     else:
         out = unique_output(tc["output_dir"], "event_encoder")
         if out.exists() and any(out.iterdir()):
@@ -172,6 +189,9 @@ def train_event_encoder(cfg):
     write_json(out / "config.json", cfg)
     metadata = {"config": cfg, "manifest_sha256": manifest_hash,
                 "output_dir": str(out), "schema_version": "tracka-event-v1",
+                "forked_from_checkpoint": fork_source,
+                "forked_from_step": step if fork_source is not None else None,
+                "forked_from_sha256": file_hash(fork_source) if fork_source is not None else None,
                 "normalization": "uint8 / 127.5 - 1",
                 "active_student_encoder_parameters": active_encoder_parameters(model.student),
                 "student_encoder_parameters_total": sum(p.numel() for p in model.student.parameters()),

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Resume a frozen RGB/Event encoder to 10k, smoke-test, then train a 3-epoch PushT predictor.
 set -euo pipefail
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "PIPELINE FAILED (exit $status) at $(date -Is); see the error above" >&2; fi' EXIT
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: $0 /absolute/path/to/event_encoder_run" >&2
@@ -33,8 +34,10 @@ if [ -e "$SMOKE_DIR" ] || [ -e "$FULL_DIR" ]; then
   exit 1
 fi
 cd "$REPO_DIR"
+echo "Event predictor pipeline started at $(date -Is), git $(git rev-parse --short HEAD)"
 "$PYTHON_BIN" -m pytest tests/test_tracka_event_predictor_integration.py -q
 STEP="$("$PYTHON_BIN" -c 'from tracka.common import load_checkpoint; import sys; c=load_checkpoint(sys.argv[1]); assert c.get("schema_version")=="tracka-event-v1"; print(c["global_step"])' "$EVENT_CKPT")"
+LOGGED_STEP="$("$PYTHON_BIN" -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(max((json.loads(s).get("train/global_step",0) for s in p.read_text().splitlines()),default=0) if p.exists() else 0)' "$EVENT_RUN_DIR/metrics.jsonl")"
 if [ "$STEP" -gt 10000 ]; then
   echo "Event checkpoint is past the requested 10,000 steps: $STEP" >&2
   exit 1
@@ -43,8 +46,19 @@ if [ "$STEP" -lt 10000 ]; then
   if [ "$STEP" -eq 5000 ]; then
     cp -n "$EVENT_CKPT" "$EVENT_RUN_DIR/checkpoint_step05000.pt"
   fi
-  echo "Resuming Event encoder from step $STEP to 10000"
-  "$PYTHON_BIN" -c 'from tracka.common import load_checkpoint; from tracka.event_train import train_event_encoder; import sys; p=sys.argv[1]; c=load_checkpoint(p)["config"]; c["training"]["resume"]=p; c["training"]["total_optimizer_updates"]=10000; c["logging"]["fallback_to_local"]=False; train_event_encoder(c)' "$EVENT_CKPT"
+  if [ "${LOGGED_STEP%.*}" -gt "$STEP" ]; then
+    RECOVERY_DIR="${EVENT_RUN_DIR}_recovered_from_${STEP}"
+    if [ -e "$RECOVERY_DIR" ]; then
+      echo "Recovery output already exists; refusing to overwrite: $RECOVERY_DIR" >&2
+      exit 1
+    fi
+    echo "Original metrics reach $LOGGED_STEP but checkpoint is $STEP; forking a clean run at $RECOVERY_DIR"
+    "$PYTHON_BIN" -c 'from tracka.common import load_checkpoint; from tracka.event_train import train_event_encoder; import sys; p,out=sys.argv[1:]; saved=load_checkpoint(p); c=saved["config"]; c["training"]["resume"]=p; c["training"]["output_dir"]=out; c["training"]["fork_from_checkpoint"]=True; c["training"]["total_optimizer_updates"]=10000; c["logging"]["name"]="trackA-event-recovered-from-"+str(saved["global_step"]); c["logging"]["fallback_to_local"]=False; train_event_encoder(c)' "$EVENT_CKPT" "$RECOVERY_DIR"
+    EVENT_CKPT="$RECOVERY_DIR/checkpoint_latest.pt"
+  else
+    echo "Resuming Event encoder from step $STEP to 10000"
+    "$PYTHON_BIN" -c 'from tracka.common import load_checkpoint; from tracka.event_train import train_event_encoder; import sys; p=sys.argv[1]; c=load_checkpoint(p)["config"]; c["training"]["resume"]=p; c["training"]["total_optimizer_updates"]=10000; c["logging"]["fallback_to_local"]=False; train_event_encoder(c)' "$EVENT_CKPT"
+  fi
 fi
 STEP="$("$PYTHON_BIN" -c 'from tracka.common import load_checkpoint; import sys; print(load_checkpoint(sys.argv[1])["global_step"])' "$EVENT_CKPT")"
 if [ "$STEP" -ne 10000 ]; then

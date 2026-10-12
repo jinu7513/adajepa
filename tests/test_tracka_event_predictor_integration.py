@@ -191,3 +191,29 @@ def test_event_preflight_requires_previous_and_full_trajectories(tmp_path):
             else:
                 destination.touch()
     validate_tracka_predictor_inputs(cfg)
+
+
+def test_event_resume_forks_when_metrics_are_ahead(tmp_path):
+    from tracka.event_train import resume_destination
+
+    old = tmp_path / "original"
+    old.mkdir()
+    metrics = old / "metrics.jsonl"
+    metrics.write_text('{"train/global_step": 5000}\n{"train/global_step": 5060}\n')
+    checkpoint = {"output_dir": str(old), "global_step": 5000,
+                  "wandb_run_id": "original-wandb-id"}
+    training = {"resume": str(old / "checkpoint_latest.pt"),
+                "output_dir": None, "fork_from_checkpoint": False}
+    with pytest.raises(ValueError, match="older than durable metrics"):
+        resume_destination(checkpoint, training)
+    fresh = tmp_path / "new-run"
+    training.update(output_dir=str(fresh), fork_from_checkpoint=True)
+    destination, run_id, source = resume_destination(checkpoint, training)
+    assert destination == fresh
+    assert run_id is None  # A fork must get a fresh W&B identity.
+    assert source == str(old / "checkpoint_latest.pt")
+    assert metrics.read_text().endswith('{"train/global_step": 5060}\n')
+    fresh.mkdir()
+    (fresh / "existing.txt").touch()
+    with pytest.raises(FileExistsError, match="new and empty"):
+        resume_destination(checkpoint, training)

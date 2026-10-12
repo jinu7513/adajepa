@@ -51,3 +51,16 @@ validation latent loss before extending it. `env.num_workers=1` avoids the
 earlier 16-worker validation kill, while batch size 8 is conservative for the
 L40S. This command has not yet been run on CIRCE and is not a GPU performance
 or successful-completion guarantee.
+
+### Interrupted encoder recovery
+
+An interrupted Event run can log update 5060 while its latest checkpoint is
+still step 5000 (`save_every=100`). The extra logged 60 updates have **no
+recoverable optimizer/teacher state**. In-place resume intentionally refuses
+to rewind and duplicate the durable JSONL/W&B history. The pipeline detects
+this case and forks from the verified 5000-step checkpoint into a fresh sibling
+directory named `<original>_recovered_from_5000`, with a **new W&B run ID**.
+The old metrics, W&B history and checkpoint are left untouched. The recovered
+run records its source path, step and SHA-256 in metadata, then uses its own
+10000-step checkpoint for predictor training. Never run the pipeline alongside
+another process writing the source checkpoint.

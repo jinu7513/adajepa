@@ -65,6 +65,7 @@ training:
   save_every: 100
   output_dir: null
   resume: null
+  fork_from_checkpoint: false  # New output/W&B run; preserves a source run with logs beyond its checkpoint.
 
 logging:
   mode: online
