@@ -25,7 +25,7 @@ class CountingReader:
         )
 
 
-def make_dataset(tmp_path, *, merge, cache_size):
+def make_dataset(tmp_path, *, merge, cache_size, frame_cache_size=0):
     data = pusht.PushTDataset.__new__(pusht.PushTDataset)
     data.data_path = Path(tmp_path)
     data.actions = torch.zeros(2, 20, 2)
@@ -36,6 +36,7 @@ def make_dataset(tmp_path, *, merge, cache_size):
     data.include_previous_frames = True
     data.merge_video_reads = merge
     data.video_reader_cache_size = cache_size
+    data.video_frame_cache_size = frame_cache_size
     data._video_reader_pid = None
     return data
 
@@ -75,6 +76,41 @@ def test_reader_cache_is_bounded_and_process_local(monkeypatch):
     assert not data.__getstate__()["_video_reader_cache"]
 
 
+def test_decoded_frame_cache_reuses_adjacent_windows_without_changing_values(monkeypatch):
+    monkeypatch.setattr(pusht, "VideoReader", CountingReader)
+    CountingReader.opens = []
+    CountingReader.batches = []
+    pid = [10]
+    monkeypatch.setattr(pusht.os, "getpid", lambda: pid[0])
+    baseline = make_dataset("unused", merge=True, cache_size=1)
+    first, _, _, _ = baseline.get_frames(0, [0, 5, 10, 15])
+    second, _, _, _ = baseline.get_frames(0, [1, 6, 11, 16])
+    assert CountingReader.batches[-1] == [0, 1, 5, 6, 10, 11, 15, 16]
+
+    CountingReader.batches = []
+    cached = make_dataset("unused", merge=True, cache_size=1, frame_cache_size=32)
+    cached_first, _, _, _ = cached.get_frames(0, [0, 5, 10, 15])
+    cached_second, _, _, _ = cached.get_frames(0, [1, 6, 11, 16])
+    assert CountingReader.batches == [
+        [0, 4, 5, 9, 10, 14, 15], [1, 6, 11, 16]
+    ]
+    for expected, actual in ((first, cached_first), (second, cached_second)):
+        for key in expected:
+            torch.testing.assert_close(actual[key], expected[key])
+    assert len(cached._video_frame_cache) == 11
+    assert not cached.__getstate__()["_video_frame_cache"]
+    pid[0] = 11
+    cached.get_frames(0, [0, 5, 10, 15])
+    assert CountingReader.batches[-1] == [0, 4, 5, 9, 10, 14, 15]
+
+    # A cache smaller than one request must still return every requested frame.
+    tiny = make_dataset("unused", merge=True, cache_size=0, frame_cache_size=2)
+    tiny_obs, _, _, _ = tiny.get_frames(0, [0, 5, 10, 15])
+    for key in first:
+        torch.testing.assert_close(tiny_obs[key], first[key])
+    assert len(tiny._video_frame_cache) == 2
+
+
 def test_window_blocks_cover_exact_same_windows():
     class Trajectories:
         proprio_dim = 4
@@ -111,3 +147,10 @@ def test_merged_reads_match_real_video_if_dataset_is_available():
     merged, _, _, _ = data.get_frames(0, [0, 5, 10, 15])
     for key in baseline:
         torch.testing.assert_close(merged[key], baseline[key])
+    next_baseline, _, _, _ = data.get_frames(0, [1, 6, 11, 16])
+    data.video_frame_cache_size = 32
+    cached_first, _, _, _ = data.get_frames(0, [0, 5, 10, 15])
+    cached_second, _, _, _ = data.get_frames(0, [1, 6, 11, 16])
+    for expected, actual in ((baseline, cached_first), (next_baseline, cached_second)):
+        for key in expected:
+            torch.testing.assert_close(actual[key], expected[key])

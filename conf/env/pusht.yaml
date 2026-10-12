@@ -10,6 +10,7 @@ dataset:
   n_rollout: null
   include_previous_frames: false
   video_reader_cache_size: 0  # per DataLoader worker; 0 preserves the original behavior
+  video_frame_cache_size: 0  # raw decoded frames per worker; 0 disables caching
   merge_video_reads: false  # decode current and previous frames in one get_batch call
   window_block_size: 1  # 1 preserves global window shuffle; >1 groups nearby windows
   normalize_action: ${normalize_action}

@@ -33,6 +33,7 @@ class PushTDataset(TrajDataset):
         include_previous_frames: bool = False,
         video_reader_cache_size: int = 0,
         merge_video_reads: bool = False,
+        video_frame_cache_size: int = 0,
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
@@ -74,11 +75,15 @@ class PushTDataset(TrajDataset):
         self.include_previous_frames = include_previous_frames
         if video_reader_cache_size < 0:
             raise ValueError("video_reader_cache_size must be nonnegative")
+        if video_frame_cache_size < 0:
+            raise ValueError("video_frame_cache_size must be nonnegative")
         self.video_reader_cache_size = video_reader_cache_size
         self.merge_video_reads = merge_video_reads
+        self.video_frame_cache_size = video_frame_cache_size
         # DataLoader workers must never share an open decoder across processes.
         self._video_reader_pid = os.getpid()
         self._video_reader_cache = OrderedDict()
+        self._video_frame_cache = OrderedDict()
         if with_velocity:
             self.velocities = torch.load(self.data_path / "velocities.pth")
             self.velocities = self.velocities[:n].float()
@@ -121,18 +126,23 @@ class PushTDataset(TrajDataset):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_video_reader_cache"] = OrderedDict()
+        state["_video_frame_cache"] = OrderedDict()
         state["_video_reader_pid"] = None
         return state
 
+    def _ensure_video_cache_process(self):
+        pid = os.getpid()
+        if getattr(self, "_video_reader_pid", None) != pid:
+            self._video_reader_cache = OrderedDict()
+            self._video_frame_cache = OrderedDict()
+            self._video_reader_pid = pid
+
     def _get_video_reader(self, idx):
+        self._ensure_video_cache_process()
         cache_size = getattr(self, "video_reader_cache_size", 0)
         path = self.data_path / "obses" / f"episode_{idx:03d}.mp4"
         if not cache_size:
             return VideoReader(str(path), num_threads=1)
-        pid = os.getpid()
-        if getattr(self, "_video_reader_pid", None) != pid:
-            self._video_reader_cache = OrderedDict()
-            self._video_reader_pid = pid
         cache = self._video_reader_cache
         if idx in cache:
             cache.move_to_end(idx)
@@ -143,6 +153,32 @@ class PushTDataset(TrajDataset):
             cache.popitem(last=False)
         return reader
 
+    def _get_cached_video_frames(self, reader, idx, frames):
+        """Return frames in request order; cache raw uint8 frames per worker."""
+        self._ensure_video_cache_process()
+        cache = self._video_frame_cache
+        limit = self.video_frame_cache_size
+        requested = sorted({int(frame) for frame in frames})
+        found = {}
+        missing = []
+        for frame in requested:
+            key = (int(idx), frame)
+            if key in cache:
+                cache.move_to_end(key)
+                found[frame] = cache[key]
+            else:
+                missing.append(frame)
+        if missing:
+            decoded = reader.get_batch(missing)
+            for position, frame in enumerate(missing):
+                # Copy each frame so one cached view cannot retain the entire
+                # decoded batch after the other frames have been evicted.
+                found[frame] = decoded[position].clone()
+                cache[(int(idx), frame)] = found[frame]
+                if len(cache) > limit:
+                    cache.popitem(last=False)
+        return torch.stack([found[int(frame)] for frame in frames])
+
     def get_frames(self, idx, frames):
         frames = list(frames)
         reader = self._get_video_reader(idx)
@@ -152,7 +188,13 @@ class PushTDataset(TrajDataset):
         shape = self.shapes[idx]
 
         previous_frames = [max(0, frame - 1) for frame in frames]
-        if self.include_previous_frames and getattr(self, "merge_video_reads", False):
+        frame_cache_size = getattr(self, "video_frame_cache_size", 0)
+        if frame_cache_size:
+            requested = frames + previous_frames if self.include_previous_frames else frames
+            decoded = self._get_cached_video_frames(reader, idx, requested)
+            image = decoded[:len(frames)]
+            previous_image = decoded[len(frames):] if self.include_previous_frames else None
+        elif self.include_previous_frames and getattr(self, "merge_video_reads", False):
             # Decode each requested frame at most once, in temporal order.
             requested = sorted(set(frames + previous_frames))
             positions = {frame: position for position, frame in enumerate(requested)}
@@ -203,6 +245,7 @@ def load_pusht_slice_train_val(
     include_previous_frames=False,
     video_reader_cache_size=0,
     merge_video_reads=False,
+    video_frame_cache_size=0,
     window_block_size=1,
 ):
     train_dset = PushTDataset(
@@ -214,6 +257,7 @@ def load_pusht_slice_train_val(
         include_previous_frames=include_previous_frames,
         video_reader_cache_size=video_reader_cache_size,
         merge_video_reads=merge_video_reads,
+        video_frame_cache_size=video_frame_cache_size,
     )
     val_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -224,6 +268,7 @@ def load_pusht_slice_train_val(
         include_previous_frames=include_previous_frames,
         video_reader_cache_size=video_reader_cache_size,
         merge_video_reads=merge_video_reads,
+        video_frame_cache_size=video_frame_cache_size,
     )
 
     num_frames = num_hist + num_pred
