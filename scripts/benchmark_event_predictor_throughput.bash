@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compare short Event-predictor runs on one GPU without saving model checkpoints.
 # Usage: DATASET_DIR=/absolute/path/data_full bash scripts/benchmark_event_predictor_throughput.bash /absolute/path/checkpoint_latest.pt
+# Set BENCH_ONLY_CASE=b32_w4,b64_w4 to run those two cases sequentially.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -20,6 +21,9 @@ case "$BENCH_ONLY_CASE" in
   b16_w1) CASE_SPECS=('b16_w1:16:1') ;;
   b32_w1) CASE_SPECS=('b32_w1:32:1') ;;
   b32_w2) CASE_SPECS=('b32_w2:32:2') ;;
+  b32_w4) CASE_SPECS=('b32_w4:32:4') ;;
+  b64_w4) CASE_SPECS=('b64_w4:64:4') ;;
+  b32_w4,b64_w4) CASE_SPECS=('b32_w4:32:4' 'b64_w4:64:4') ;;
   b128_w4) CASE_SPECS=('b128_w4:128:4') ;;
   *) echo "Unknown BENCH_ONLY_CASE: $BENCH_ONLY_CASE" >&2; exit 2 ;;
 esac
