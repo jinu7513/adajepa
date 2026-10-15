@@ -20,6 +20,7 @@ from env.venv import SubprocVectorEnv
 from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
+from planning.event_observation import with_previous_visual
 from planning.image_corruption import corrupt_obs_dict
 from utils import cfg_to_dict, seed
 
@@ -213,6 +214,13 @@ class PlanWorkspace:
             self.prepare_targets_from_segments(cfg_dict["eval_data_path"])
         else:
             self.prepare_targets()
+
+        if getattr(self.wm.encoder, "requires_previous_frame", False):
+            if "visual_previous" not in self.obs_0 or "visual_previous" not in self.obs_g:
+                raise ValueError(
+                    "Event MPC needs visual_previous in both start and goal observations; "
+                    "use goal_source=segments or a target file containing true preceding frames"
+                )
 
         self.evaluator = PlanEvaluator(
             obs_0=self.obs_0,
@@ -494,6 +502,8 @@ class PlanWorkspace:
                 rollout_obses, ood_corruption, self.cfg_dict.get("ood_level", None),
                 seed=int(base_seed),
             )
+        if getattr(self.wm.encoder, "requires_previous_frame", False):
+            rollout_obses = with_previous_visual(rollout_obses)
         self.obs_0 = {
             key: np.expand_dims(arr[:, 0], axis=1)
             for key, arr in rollout_obses.items()

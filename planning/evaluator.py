@@ -13,6 +13,7 @@ from utils import (
 )
 from torchvision import utils
 from planning.image_corruption import corrupt_obs_dict
+from planning.event_observation import with_previous_visual
 
 
 class PlanEvaluator:  # evaluator for planning
@@ -132,6 +133,8 @@ class PlanEvaluator:  # evaluator for planning
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         # Intermediate observations get fresh random noise on every MPC iter.
         e_obses = self._corrupt(e_obses, random_per_call=True)
+        if getattr(self.wm.encoder, "requires_previous_frame", False):
+            e_obses = with_previous_visual(e_obses)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)
         e_final_state = self._get_traj_last(e_states, action_len * self.frameskip + 1)[

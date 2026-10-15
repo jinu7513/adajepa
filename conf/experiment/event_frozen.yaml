@@ -1,0 +1,29 @@
+# @package _global_
+# A: pretrained Event encoder is frozen; train only predictor/action/proprio modules.
+env:
+  dataset:
+    include_previous_frames: true
+    n_rollout: null
+    video_reader_cache_size: 4
+    video_frame_cache_size: 32
+    merge_video_reads: true
+    window_block_size: 2
+  num_workers: 8
+model:
+  train_encoder: false
+  train_predictor: true
+  train_decoder: false
+has_decoder: false
+training:
+  encoder_train_scope: frozen
+  save_frozen_encoder: true
+  strict_optimizer_resume: true
+  epochs: 3
+  batch_size: 32
+  seed: 0
+  stop_grad: true
+  mixed_precision: bf16
+  rollout_eval_count: 0
+  save_every_x_iterations: 0
+  save_every_x_epoch: 1
+wandb_project: adajepa_trackA_event_predictor

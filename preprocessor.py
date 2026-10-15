@@ -58,5 +58,7 @@ class Preprocessor:
         '''
         transformed_obs = {}
         transformed_obs['visual'] = self.transform_obs_visual(obs['visual'])
+        if 'visual_previous' in obs:
+            transformed_obs['visual_previous'] = self.transform_obs_visual(obs['visual_previous'])
         transformed_obs['proprio'] = self.normalize_proprios(torch.tensor(obs['proprio']))
         return transformed_obs

@@ -131,6 +131,18 @@ class AdaJEPATrainer:
     def _select_encoder_params(self):
         """Mirror train-time freezing: never adapt a frozen backbone."""
         encoder = self.wm.encoder
+        if getattr(encoder, "requires_previous_frame", False) and self.encoder_last_layer_only:
+            backbone = encoder.backbone
+            blocks = backbone.shared_blocks
+            params = list(blocks[-1].parameters()) if len(blocks) else []
+            params += list(backbone.final_norm.parameters())
+            if not params:
+                raise ValueError("Event encoder has no final shared block or norm to adapt")
+            log.info(
+                "AdaJEPA Event encoder adaptation uses final shared block and norm (%d tensors).",
+                len(params),
+            )
+            return params
         if hasattr(encoder, "base_model"):
             if hasattr(encoder, "projector") and getattr(encoder, "projector_name", None) in (
                 "channel",

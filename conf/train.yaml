@@ -6,6 +6,7 @@ defaults:
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
+  - optional experiment: null
   - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}
@@ -53,6 +54,7 @@ training:
   vcreg_cov_coeff: 0
   mixed_precision: bf16
   save_frozen_encoder: false  # Store a frozen encoder in predictor checkpoints when enabled.
+  encoder_train_scope: full  # Event only: full or final_shared; frozen with train_encoder=false.
 
 img_size: 224 # should be a multiple of 224
 frameskip: 5

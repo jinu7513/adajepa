@@ -8,6 +8,9 @@ import warnings
 import threading
 import itertools
 import pickle
+import tempfile
+import json
+import math
 import numpy as np
 from tqdm import tqdm
 from omegaconf import OmegaConf, open_dict
@@ -38,8 +41,16 @@ def validate_tracka_predictor_inputs(cfg):
         return
     if cfg.env.name != "pusht":
         raise ValueError("Track A patch predictor recipe currently supports env=pusht only")
-    if cfg.model.train_encoder or not cfg.model.train_predictor:
-        raise ValueError("Track A patch predictor requires a frozen encoder and trainable predictor")
+    scope = cfg.training.get("encoder_train_scope", "full")
+    if not cfg.model.train_predictor:
+        raise ValueError("Track A predictor requires model.train_predictor=true")
+    if event_encoder:
+        if cfg.model.train_encoder and scope not in ("full", "final_shared"):
+            raise ValueError("Joint Event training requires encoder_train_scope=full or final_shared")
+        if not cfg.model.train_encoder and scope not in ("full", "frozen"):
+            raise ValueError("Frozen Event training requires encoder_train_scope=frozen")
+    elif cfg.model.train_encoder:
+        raise ValueError("Track A patch predictor requires a frozen encoder")
     if cfg.has_decoder or cfg.model.train_decoder:
         raise ValueError("Track A patch predictor recipe requires has_decoder=false model.train_decoder=false")
     if not cfg.training.save_frozen_encoder:
@@ -253,6 +264,8 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
+        if self.cfg.has_predictor:
+            self._keys_to_save.append("action_encoder_optimizer")
 
         self.init_models()
         self.init_optimizers()
@@ -260,6 +273,19 @@ class Trainer:
         self.epoch_log = OrderedDict()
 
     def _configure_encoder_trainability(self):
+        if getattr(self.encoder, "name", None) == "tracka_event_patch" and self.train_encoder:
+            scope = self.cfg.training.get("encoder_train_scope", "full")
+            for param in self.encoder.parameters():
+                param.requires_grad = scope == "full"
+            if scope == "final_shared":
+                backbone = self.encoder.backbone
+                if not backbone.shared_blocks:
+                    raise ValueError("Event final_shared scope needs at least one shared transformer block")
+                for module in (backbone.shared_blocks[-1], backbone.final_norm):
+                    for param in module.parameters():
+                        param.requires_grad = True
+            log.info("Event encoder training scope: %s", scope)
+            return
         base_model = getattr(self.encoder, "base_model", None)
         if base_model is not None:
             for param in base_model.parameters():
@@ -309,8 +335,18 @@ class Trainer:
                     ckpt[k] = self.accelerator.unwrap_model(v)
                 else:
                     ckpt[k] = v
-            torch.save(ckpt, "checkpoints/model_latest.pth")
-            torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
+            # Never expose a partially written checkpoint as the resume target.
+            for destination in (Path("checkpoints") / "model_latest.pth",
+                                Path("checkpoints") / f"model_{self.epoch}.pth"):
+                with tempfile.NamedTemporaryFile(dir=destination.parent,
+                                                 prefix=f".{destination.name}.",
+                                                 suffix=".tmp", delete=False) as stream:
+                    temporary = Path(stream.name)
+                try:
+                    torch.save(ckpt, temporary)
+                    os.replace(temporary, destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
             log.info("Saved model to {}".format(os.getcwd()))
             ckpt_path = os.path.join(os.getcwd(), f"checkpoints/model_{self.epoch}.pth")
         else:
@@ -475,8 +511,11 @@ class Trainer:
     def init_optimizers(self):
         self.encoder_optimizer = None
         if self.train_encoder:
+            encoder_parameters = [p for p in self.encoder.parameters() if p.requires_grad]
+            if not encoder_parameters:
+                raise ValueError("train_encoder=true but no encoder parameters are trainable")
             self.encoder_optimizer = torch.optim.Adam(
-                self.encoder.parameters(),
+                encoder_parameters,
                 lr=self.cfg.training.encoder_lr,
             )
             self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
@@ -485,6 +524,8 @@ class Trainer:
                     self.encoder_optimizer.load_state_dict(self._loaded_optim_state["encoder_optimizer"])
                     log.info("Loaded encoder optimizer state from checkpoint.")
                 except Exception as e:
+                    if self.cfg.training.get("strict_optimizer_resume", False):
+                        raise RuntimeError("Cannot restore Event encoder optimizer state") from e
                     log.warning(f"Failed to load encoder optimizer state: {e}")
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
@@ -499,6 +540,8 @@ class Trainer:
                     self.predictor_optimizer.load_state_dict(self._loaded_optim_state["predictor_optimizer"])
                     log.info(f"Loaded predictor optimizer state from checkpoint.")
                 except Exception as e:
+                    if self.cfg.training.get("strict_optimizer_resume", False):
+                        raise RuntimeError("Cannot restore predictor optimizer state") from e
                     log.warning(f"Failed to load predictor optimizer state: {e}")
 
             self.action_encoder_optimizer = torch.optim.AdamW(
@@ -515,6 +558,8 @@ class Trainer:
                     self.action_encoder_optimizer.load_state_dict(self._loaded_optim_state["action_encoder_optimizer"])
                     log.info(f"Loaded action/proprio optimizer state from checkpoint.")
                 except Exception as e:
+                    if self.cfg.training.get("strict_optimizer_resume", False):
+                        raise RuntimeError("Cannot restore action/proprio optimizer state") from e
                     log.warning(f"Failed to load action/proprio optimizer state: {e}")
 
         if self.cfg.has_decoder:
@@ -961,6 +1006,14 @@ class Trainer:
                 Validation loss: {epoch_log['val_loss']:.4f}")
 
         if self.accelerator.is_main_process:
+            durable_metrics = {
+                key: (float(value) if math.isfinite(float(value)) else None)
+                for key, value in epoch_log.items()
+            }
+            with open("epoch_metrics.jsonl", "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(durable_metrics, allow_nan=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
 

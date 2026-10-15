@@ -96,6 +96,46 @@ def test_event_world_model_predictor_backward_and_missing_previous(tmp_path):
     assert all(param.grad is None for param in encoder.parameters())
 
 
+@pytest.mark.parametrize("scope", ["full", "final_shared"])
+def test_event_joint_training_reaches_selected_encoder_and_predictor(tmp_path, scope):
+    from train import Trainer
+
+    path, _ = make_event_checkpoint(tmp_path)
+    encoder = TrackAEventPatchEncoder(str(path))
+    trainer = Trainer.__new__(Trainer)
+    trainer.encoder = encoder
+    trainer.train_encoder = True
+    trainer.cfg = OmegaConf.create({"training": {"encoder_train_scope": scope}})
+    trainer._configure_encoder_trainability()
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert trainable
+    if scope == "full":
+        assert trainable == {name for name, _ in encoder.named_parameters()}
+    else:
+        assert all(name.startswith(("backbone.shared_blocks.0.", "backbone.final_norm."))
+                   for name in trainable)
+        assert any(name.startswith("backbone.shared_blocks.0.") for name in trainable)
+
+    world = VWorldModel(
+        image_size=32, num_hist=2, num_pred=1, encoder=encoder,
+        proprio_encoder=TinyEmbedding(4, 8), action_encoder=TinyEmbedding(2, 8),
+        decoder=None, predictor=ViTPredictor(num_patches=16, num_frames=2, dim=40,
+                                            depth=1, heads=2, mlp_dim=64),
+        proprio_dim=8, action_dim=8, concat_dim=1,
+        num_action_repeat=1, num_proprio_repeat=1,
+        train_encoder=True, train_predictor=True, train_decoder=False, stop_grad=True,
+    )
+    obs = {"visual": torch.randn(2, 3, 3, 32, 32),
+           "visual_previous": torch.randn(2, 3, 3, 32, 32),
+           "proprio": torch.randn(2, 3, 4)}
+    world(obs, torch.randn(2, 3, 2))[3].backward()
+    assert any(param.grad is not None for name, param in encoder.named_parameters()
+               if name in trainable)
+    assert all(param.grad is None for name, param in encoder.named_parameters()
+               if name not in trainable)
+    assert any(param.grad is not None for param in world.predictor.parameters())
+
+
 def test_event_video_reads_true_previous_frame(monkeypatch, tmp_path):
     from datasets.pusht_dset import PushTDataset
     import datasets.pusht_dset as pusht
@@ -191,6 +231,14 @@ def test_event_preflight_requires_previous_and_full_trajectories(tmp_path):
             else:
                 destination.touch()
     validate_tracka_predictor_inputs(cfg)
+    cfg.model.train_encoder = True
+    cfg.training.encoder_train_scope = "full"
+    validate_tracka_predictor_inputs(cfg)
+    cfg.training.encoder_train_scope = "final_shared"
+    validate_tracka_predictor_inputs(cfg)
+    cfg.model.train_encoder = False
+    with pytest.raises(ValueError, match="encoder_train_scope=frozen"):
+        validate_tracka_predictor_inputs(cfg)
 
 
 def test_event_resume_forks_when_metrics_are_ahead(tmp_path):
