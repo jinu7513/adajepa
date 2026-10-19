@@ -71,7 +71,9 @@ run_case() {
   local -a color_args=("env_kwargs_override=null")
   local -a adapt_args=("planner.adapt.lr=0" "planner.adapt.steps=0"
                        "planner.adapt.finetune_encoder=false")
-  local -a smoke_args=()
+  # Bash 4.2 with `set -u` errors when expanding an empty array. Keep this
+  # array nonempty for both smoke and full evaluation cases.
+  local -a plan_args=("decode_for_viz=false")
   case "$condition" in
     default) ;;
     blur) corruption=blur ;;
@@ -84,7 +86,7 @@ run_case() {
                 "planner.adapt.last_layer_only=true" "planner.adapt.encoder_last_layer_only=true")
   fi
   if [[ "$smoke" == smoke ]]; then
-    smoke_args=("planner.sub_planner.opt_steps=5")
+    plan_args+=("planner.sub_planner.opt_steps=5")
   fi
   mkdir -p "$run_dir"
   echo "Starting $smoke $condition $method ($count samples, $max_iter MPC steps)"
@@ -92,8 +94,7 @@ run_case() {
       "model_name=$MODEL_NAME" "ckpt_base_path=$MODEL_DIR" "model_epoch=$MODEL_EPOCH" \
       "eval_data_path=$TARGETS" "n_evals=$count" "seed=$SEED" \
       "planner.max_iter=$max_iter" "ood_corruption=$corruption" \
-      "${color_args[@]}" "${adapt_args[@]}" "${smoke_args[@]}" \
-      "decode_for_viz=false" \
+      "${color_args[@]}" "${adapt_args[@]}" "${plan_args[@]}" \
       "+condition=$condition" "+method=$method" \
       "+wandb_logging=true" "+wandb_project=$WANDB_PROJECT" \
       "+wandb_group=event-comparison-epoch${MODEL_EPOCH}-seed${SEED}" \
