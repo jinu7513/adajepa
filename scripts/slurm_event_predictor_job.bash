@@ -18,9 +18,10 @@ REPO="$(cd "$REPO" && pwd -P)"
 }
 cd "$REPO"
 case "$EXPERIMENT" in
-  A) RECIPE=event_frozen; TRAIN_ENCODER=false; SCOPE=frozen ;;
-  B) RECIPE=event_joint; TRAIN_ENCODER=true; SCOPE=full ;;
-  C) RECIPE=event_final_shared; TRAIN_ENCODER=true; SCOPE=final_shared ;;
+  A) RECIPE=event_frozen; ENCODER_RECIPE=tracka_event_patch; TRAIN_ENCODER=false; SCOPE=frozen ;;
+  B) RECIPE=event_joint; ENCODER_RECIPE=tracka_event_patch; TRAIN_ENCODER=true; SCOPE=full ;;
+  C) RECIPE=event_final_shared; ENCODER_RECIPE=tracka_event_patch; TRAIN_ENCODER=true; SCOPE=final_shared ;;
+  D) RECIPE=event_scratch_joint; ENCODER_RECIPE=tracka_event_patch_scratch; TRAIN_ENCODER=true; SCOPE=full ;;
   *) echo "Unknown experiment" >&2; exit 2 ;;
 esac
 
@@ -32,21 +33,38 @@ printf 'job=%s host=%s experiment=%s git=%s start=%s\n' \
   "$SLURM_JOB_ID" "$(hostname)" "$EXPERIMENT" "$(git rev-parse HEAD)" "$(date -Is)" \
   | tee -a "$RUN_DIR/job_history.log"
 
+if [[ "$EXPERIMENT" == D ]]; then
+  "$PYTHON_BIN" - "$TRACKA_EVENT_ENCODER_CKPT" \
+    "$REPO/conf/encoder/tracka_event_patch_scratch.yaml" <<'PY'
+import sys
+from omegaconf import OmegaConf
+from tracka.common import load_checkpoint
+
+reference = load_checkpoint(sys.argv[1])  # Architecture reference only; do not load its weights.
+scratch = OmegaConf.to_container(OmegaConf.load(sys.argv[2]).model_config, resolve=True)
+if reference.get("schema_version") != "tracka-event-v1" or reference.get("global_step") != 10000:
+    raise SystemExit("Scratch comparison needs the same 10k Event architecture reference as B")
+if dict(reference["config"]["model"]) != scratch:
+    raise SystemExit("Scratch Event architecture does not match the pretrained reference")
+print("Scratch architecture matches B; no pretrained encoder weights will be loaded")
+PY
+fi
+
 # A complete epoch is the only supported resume point. Do not use iteration
 # checkpointing: the upstream loader cannot restore its mid-epoch cursor.
 COMPLETED=0
 if [[ -f "$RUN_DIR/checkpoints/model_latest.pth" ]]; then
   COMPLETED="$("$PYTHON_BIN" - "$RUN_DIR" "$TRACKA_EVENT_ENCODER_CKPT" \
-    "$DATASET_DIR" "$TRAIN_ENCODER" "$SCOPE" <<'PY'
+    "$DATASET_DIR" "$TRAIN_ENCODER" "$SCOPE" "$EXPERIMENT" <<'PY'
 import sys
 import torch
 from omegaconf import OmegaConf
 
-directory, event_checkpoint, dataset, train_encoder, scope = sys.argv[1:]
+directory, event_checkpoint, dataset, train_encoder, scope, experiment = sys.argv[1:]
 config = OmegaConf.load(directory + "/hydra.yaml")
 expected = {
     "encoder._target_": "models.tracka_event_patch.TrackAEventPatchEncoder",
-    "encoder.checkpoint_path": event_checkpoint,
+    "encoder.checkpoint_path": None if experiment == "D" else event_checkpoint,
     "env.dataset.data_path": dataset + "/pusht_noise",
     "env.dataset.include_previous_frames": True,
     "env.dataset.n_rollout": None,
@@ -67,6 +85,8 @@ for key, value in expected.items():
     actual = OmegaConf.select(config, key)
     if actual != value:
         raise SystemExit(f"Unsafe resume: {key}={actual!r}, expected {value!r}")
+if experiment == "D" and OmegaConf.select(config, "encoder.model_config") is None:
+    raise SystemExit("Unsafe resume: scratch Event architecture is missing")
 checkpoint = torch.load(directory + "/checkpoints/model_latest.pth", map_location="cpu", weights_only=False)
 required = ["predictor_optimizer", "action_encoder_optimizer"]
 if train_encoder == "true":
@@ -89,7 +109,7 @@ fi
 export TRACKA_EVENT_ENCODER_CKPT DATASET_DIR
 echo "Training experiment $EXPERIMENT from completed epoch $COMPLETED to $TARGET_EPOCHS"
 "$PYTHON_BIN" train.py --config-name train \
-  env=pusht encoder=tracka_event_patch experiment="$RECIPE" \
+  env=pusht encoder="$ENCODER_RECIPE" experiment="$RECIPE" \
   training.epochs="$REMAINING" \
   wandb_run_name="event-${EXPERIMENT}-seed0" \
   "hydra.run.dir=$RUN_DIR"

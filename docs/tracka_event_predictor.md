@@ -1,6 +1,6 @@
 # RGB/Event encoder -> PushT predictor and MPC evaluation
 
-## Fair Event encoder comparison (A/B/C)
+## Event encoder comparison (A/B/C/D)
 
 The existing Event predictor checkpoint is experiment **A**: pretrained Event
 encoder frozen, original AdaJEPA predictor plus action/proprio modules trained.
@@ -22,8 +22,23 @@ auxiliary temporal head. An equal epoch count matches data exposure, not GPU
 hours. B/C can be slower and B may need a smaller batch if the L40S runs out
 of memory; record any deviation before claiming a controlled comparison.
 
+**D** (`experiment=event_scratch_joint`, `encoder=tracka_event_patch_scratch`)
+starts both Event encoder and predictor from random weights and trains them
+together on the same PushT trajectories, windows, loss, and three-epoch budget
+as B. D takes the 10k Event checkpoint path only as an *architecture reference*
+at submission time: the Slurm preflight compares model configurations but
+does not load its weights. The predictor checkpoint embeds D's random-init
+encoder after training. B versus D therefore isolates the effect of Event
+pretraining while keeping the joint predictor-training protocol matched.
+This is not an identical-architecture comparison to the paper's ResNet model.
+Stop-gradient alone may not prevent scratch latent collapse; monitor
+`train_event_patch_cross_sample_std` and
+`train_event_patch_mean_cross_sample_std` (and validation counterparts), then
+compare frozen and adaptive MPC success rather than relying on prediction loss.
+
 The recipe files are `conf/experiment/event_frozen.yaml`,
-`event_joint.yaml`, and `event_final_shared.yaml`. The optimizer LR for the
+`event_joint.yaml`, `event_final_shared.yaml`, and
+`event_scratch_joint.yaml`. The optimizer LR for the
 Event encoder is the existing `training.encoder_lr=1e-5`; predictor and
 action/proprio LR retain the original settings. Each completed epoch saves an
 embedded encoder, predictor, all relevant optimizer states, W&B data, and
@@ -51,8 +66,8 @@ and walltime from the commands above; QOS/account are optional if the site's
 defaults are valid. USF's [GPU job instructions](https://wiki.rc.usf.edu/index.php/SLURM_GPU)
 show the `--gres=gpu:1` pattern, but their example hardware is dated.
 
-Wait for the currently running A job to finish before pulling changed code
-into that same checkout. Or use a separate worktree/clone for B/C. Then:
+Wait for any currently running job using this checkout to finish before pulling
+changed code into it. Or use a separate worktree/clone for B/C/D. Then:
 
 ```bash
 cd /home/j/jinwoo/adajepa
@@ -65,10 +80,12 @@ export CIRCE_TIME=2-00:00:00
 export EVENT_CKPT="$PWD/tracka_outputs/event_encoder_20261010_231557_c3bf41_recovered_from_5000/checkpoint_latest.pt"
 bash scripts/submit_event_predictor.bash B "$PWD/checkpoints/event_joint_seed0" "$EVENT_CKPT" 3
 bash scripts/submit_event_predictor.bash C "$PWD/checkpoints/event_final_shared_seed0" "$EVENT_CKPT" 3
+bash scripts/submit_event_predictor.bash D "$PWD/checkpoints/event_scratch_joint_seed0" "$EVENT_CKPT" 3
 ```
 
 Replace `EVENT_CKPT` with the verified 10,000-step pretrained checkpoint; the
-encoder config rejects any other step. For a **new** A replication, use `A`
+encoder config rejects any other step. For D, the checkpoint is read only for
+architecture verification, not initialization. For a **new** A replication, use `A`
 and a *new* output directory. Never pass the currently running A directory as
 a fresh-run target. Submitting does not depend on a live SSH/VPN session; the
 actual work starts only when Slurm allocates a GPU compute node.
@@ -94,7 +111,7 @@ repeated jobs otherwise restart that unfinished epoch.
 
 ### Matched deployment evaluation
 
-After A/B/C have a completed `model_3.pth`, evaluate **each** with the same
+After A/B/C/D have a completed `model_3.pth`, evaluate **each** with the same
 `scripts/run_event_mpc_matrix.bash` script. It runs default, blur, and redBlock
 under both Frozen and AdaJEPA, same `val_T/plan_targets.pkl`, seed 100, 50
 samples and 30 MPC steps. Use a unique `EVAL_ROOT` and `VARIANT` per model; a
@@ -105,7 +122,8 @@ for B after live partition/QOS/walltime checks:
 "$PYTHON_BIN" scripts/check_event_comparison.py \
   "$PWD/checkpoints/YOUR_EXISTING_A_RUN" \
   "$PWD/checkpoints/event_joint_seed0" \
-  "$PWD/checkpoints/event_final_shared_seed0"
+  "$PWD/checkpoints/event_final_shared_seed0" \
+  --D "$PWD/checkpoints/event_scratch_joint_seed0"
 mkdir -p slurm_logs
 MODEL_DIR="$PWD/checkpoints/event_joint_seed0"
 export EVAL_ROOT="$PWD/eval_outputs/event_joint_seed0"
@@ -117,7 +135,7 @@ sbatch --partition="$CIRCE_PARTITION" --gres=gpu:1 --cpus-per-task=8 \
 ```
 
 Add `--qos="$CIRCE_QOS"`/`--account="$CIRCE_ACCOUNT"` when required.
-Repeat for A and C with their own `MODEL_DIR`, `EVAL_ROOT`, and `VARIANT`.
+Repeat for A, C, and D with their own `MODEL_DIR`, `EVAL_ROOT`, and `VARIANT`.
 For the separately trained **original AdaJEPA** checkpoint, the same evaluator
 also accepts `MODEL_KIND=original` and, if needed, `MODEL_EPOCH=latest`:
 

@@ -1,4 +1,4 @@
-"""Read-only check that A/B/C predictor runs use comparable PushT inputs."""
+"""Read-only check that A/B/C[/D] predictor runs use comparable PushT inputs."""
 
 import argparse
 from pathlib import Path
@@ -22,7 +22,7 @@ MATCHED_FIELDS = (
 def audit(directories, epoch):
     configs = {}
     problems = []
-    for label, directory in zip("ABC", directories):
+    for label, directory in zip("ABCD", directories):
         folder = Path(directory).expanduser().resolve()
         config_path = folder / "hydra.yaml"
         checkpoint_path = folder / "checkpoints" / f"model_{epoch}.pth"
@@ -42,10 +42,20 @@ def audit(directories, epoch):
             problems.append("B: expected full joint encoder training")
         if label == "C" and (not training or scope != "final_shared"):
             problems.append("C: expected final_shared encoder training")
+        if label == "D":
+            if not training or scope != "full":
+                problems.append("D: expected full joint encoder training")
+            if OmegaConf.select(config, "encoder.checkpoint_path") is not None:
+                problems.append("D: encoder must start without pretrained weights")
+            if OmegaConf.select(config, "encoder.model_config") is None:
+                problems.append("D: scratch Event architecture is missing")
 
-    if len(configs) == 3:
+    if len(configs) == len(directories):
         for key in MATCHED_FIELDS:
-            values = {label: OmegaConf.select(config, key) for label, config in configs.items()}
+            # D deliberately has no source checkpoint; compare A/B/C on that field.
+            selected = {label: config for label, config in configs.items()
+                        if key != "encoder.checkpoint_path" or label != "D"}
+            values = {label: OmegaConf.select(config, key) for label, config in selected.items()}
             if key in ("encoder.checkpoint_path", "env.dataset.data_path"):
                 values = {label: str(Path(value).resolve()) if value else value
                           for label, value in values.items()}
@@ -59,14 +69,16 @@ def main():
     parser.add_argument("A", help="existing frozen predictor run directory")
     parser.add_argument("B", help="full joint predictor run directory")
     parser.add_argument("C", help="final-shared predictor run directory")
+    parser.add_argument("--D", help="optional scratch-joint predictor run directory")
     parser.add_argument("--epoch", type=int, default=3)
     args = parser.parse_args()
-    problems = audit((args.A, args.B, args.C), args.epoch)
+    directories = (args.A, args.B, args.C) + ((args.D,) if args.D else ())
+    problems = audit(directories, args.epoch)
     if problems:
         for problem in problems:
             print("MISMATCH:", problem)
         raise SystemExit(1)
-    print(f"A/B/C inputs match and each has model_{args.epoch}.pth;"
+    print(f"{'A/B/C/D' if args.D else 'A/B/C'} inputs match and each has model_{args.epoch}.pth;"
           " encoder trainability differs as intended.")
 
 

@@ -3,11 +3,11 @@
 set -euo pipefail
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
-  echo "Usage: CIRCE_PARTITION=... CIRCE_TIME=... bash $0 A|B|C ABS_RUN_DIR ABS_EVENT_CKPT [TARGET_EPOCHS]" >&2
+  echo "Usage: CIRCE_PARTITION=... CIRCE_TIME=... bash $0 A|B|C|D ABS_RUN_DIR ABS_EVENT_CKPT [TARGET_EPOCHS]" >&2
   exit 2
 fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-case "$1" in A|B|C) EXPERIMENT="$1" ;; *) echo "Experiment must be A, B, or C" >&2; exit 2 ;; esac
+case "$1" in A|B|C|D) EXPERIMENT="$1" ;; *) echo "Experiment must be A, B, C, or D" >&2; exit 2 ;; esac
 RUN_DIR="$2"
 EVENT_CKPT="$3"
 TARGET_EPOCHS="${4:-3}"
@@ -22,6 +22,8 @@ DATASET_DIR="${DATASET_DIR:-$REPO/data_full}"
 [[ -x "$PYTHON_BIN" && -f "$EVENT_CKPT" && -f "$DATASET_DIR/pusht_noise/train/rel_actions.pth" ]] || {
   echo "Missing Python, Event checkpoint, or full PushT training data" >&2; exit 2;
 }
+# D uses the checkpoint only to verify that its randomly initialized encoder
+# has the same architecture as B; it never initializes weights from it.
 command -v sbatch >/dev/null || { echo "sbatch is unavailable; connect to a CIRCE login node" >&2; exit 2; }
 sinfo -h -p "$CIRCE_PARTITION" -o '%P' | grep -q . || {
   echo "Partition $CIRCE_PARTITION is not visible in sinfo" >&2; exit 2;

@@ -1,0 +1,20 @@
+_target_: models.tracka_event_patch.TrackAEventPatchEncoder
+checkpoint_path: null
+expected_step: null
+expected_sha256: null
+# Match conf/tracka_event.yaml's encoder architecture, without loading weights.
+model_config:
+  image_size: 224
+  patch_size: 16
+  embed_dim: 384
+  heads: 6
+  rgb_depth: 1
+  event_depth: 1
+  shared_depth: 5
+  event_mode: hard_two_channel
+  event_threshold: 0.2
+  event_eps: 0.001
+  shift_previous: false
+  fusion: fixed_sum
+  global_representation: cls
+  rgb_input_mode: current

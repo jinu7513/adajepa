@@ -314,6 +314,17 @@ class VWorldModel(nn.Module):
         loss_components = {}
         decoder_enabled = self.decoder is not None and self.train_decoder
         z = self.encode(obs, act)
+        if getattr(self.encoder, "name", None) == "tracka_event_patch":
+            # Cross-sample spread at a fixed time/patch, not positional spread.
+            # These are diagnostics only; they do not change the training loss.
+            with torch.no_grad():
+                event_tokens = self.visual_only(z).float()[:, 0]
+                loss_components["event_patch_cross_sample_std"] = (
+                    event_tokens.std(dim=0, unbiased=False).mean()
+                )
+                loss_components["event_patch_mean_cross_sample_std"] = (
+                    event_tokens.mean(dim=1).std(dim=0, unbiased=False).mean()
+                )
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
         visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)

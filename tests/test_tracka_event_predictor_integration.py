@@ -1,6 +1,7 @@
 """CPU checks for frozen Event patch tokens in the PushT predictor."""
 
 import pickle
+from pathlib import Path
 
 import pytest
 import torch
@@ -22,6 +23,13 @@ MODEL_CFG = {
 }
 LOSS_CFG = {"distance": "cosine", "anti_collapse": "none",
             "lambda_rob": 1., "lambda_temp": 1., "lambda_ac": 0.}
+
+
+def test_scratch_encoder_architecture_matches_event_training_defaults():
+    repository = Path(__file__).resolve().parents[1]
+    pretrained = OmegaConf.load(repository / "conf" / "tracka_event.yaml")
+    scratch = OmegaConf.load(repository / "conf" / "encoder" / "tracka_event_patch_scratch.yaml")
+    assert OmegaConf.to_container(scratch.model_config) == OmegaConf.to_container(pretrained.model)
 
 
 def make_event_checkpoint(tmp_path, step=10000, patch_size=8):
@@ -68,6 +76,20 @@ def test_event_adapter_uses_exact_student_patch_tokens(tmp_path):
         TrackAEventPatchEncoder(str(tmp_path / "moved_event.pt"), expected_step=5000)
 
 
+def test_event_adapter_can_start_from_random_weights_without_checkpoint():
+    scratch = TrackAEventPatchEncoder(model_config=MODEL_CFG)
+    assert scratch.source_initialization == "random"
+    assert scratch.source_checkpoint is None
+    assert scratch.source_step is None
+    assert scratch.num_patches == 16
+    with pytest.raises(ValueError, match="requires model_config"):
+        TrackAEventPatchEncoder()
+    with pytest.raises(ValueError, match="cannot specify a checkpoint"):
+        TrackAEventPatchEncoder(model_config=MODEL_CFG, expected_step=10000)
+    with pytest.raises(ValueError, match="architecture comes from its checkpoint"):
+        TrackAEventPatchEncoder("/unused/reference.pt", model_config=MODEL_CFG)
+
+
 def test_event_world_model_predictor_backward_and_missing_previous(tmp_path):
     path, _ = make_event_checkpoint(tmp_path)
     encoder = TrackAEventPatchEncoder(str(path)).eval().requires_grad_(False)
@@ -96,12 +118,16 @@ def test_event_world_model_predictor_backward_and_missing_previous(tmp_path):
     assert all(param.grad is None for param in encoder.parameters())
 
 
-@pytest.mark.parametrize("scope", ["full", "final_shared"])
-def test_event_joint_training_reaches_selected_encoder_and_predictor(tmp_path, scope):
+@pytest.mark.parametrize("scope,scratch", [("full", False), ("final_shared", False),
+                                           ("full", True)])
+def test_event_joint_training_reaches_selected_encoder_and_predictor(tmp_path, scope, scratch):
     from train import Trainer
 
-    path, _ = make_event_checkpoint(tmp_path)
-    encoder = TrackAEventPatchEncoder(str(path))
+    if scratch:
+        encoder = TrackAEventPatchEncoder(model_config=MODEL_CFG)
+    else:
+        path, _ = make_event_checkpoint(tmp_path)
+        encoder = TrackAEventPatchEncoder(str(path))
     trainer = Trainer.__new__(Trainer)
     trainer.encoder = encoder
     trainer.train_encoder = True
@@ -238,6 +264,15 @@ def test_event_preflight_requires_previous_and_full_trajectories(tmp_path):
     validate_tracka_predictor_inputs(cfg)
     cfg.model.train_encoder = False
     with pytest.raises(ValueError, match="encoder_train_scope=frozen"):
+        validate_tracka_predictor_inputs(cfg)
+    cfg.model.train_encoder = True
+    cfg.training.encoder_train_scope = "full"
+    cfg.encoder.checkpoint_path = None
+    cfg.encoder.expected_step = None
+    cfg.encoder.model_config = dict(MODEL_CFG, patch_size=16)
+    validate_tracka_predictor_inputs(cfg)
+    cfg.training.encoder_train_scope = "final_shared"
+    with pytest.raises(ValueError, match="Scratch Event predictor requires full joint"):
         validate_tracka_predictor_inputs(cfg)
 
 

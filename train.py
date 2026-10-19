@@ -55,29 +55,39 @@ def validate_tracka_predictor_inputs(cfg):
         raise ValueError("Track A patch predictor recipe requires has_decoder=false model.train_decoder=false")
     if not cfg.training.save_frozen_encoder:
         raise ValueError("Set training.save_frozen_encoder=true to make planning checkpoints self-contained")
-    encoder_path = Path(cfg.encoder.checkpoint_path)
-    if not encoder_path.is_absolute():
-        raise ValueError("Track A encoder checkpoint path must be absolute")
-    if not encoder_path.is_file():
-        raise FileNotFoundError(f"Track A encoder checkpoint not found: {encoder_path}")
-    if event_encoder:
-        if not cfg.env.dataset.get("include_previous_frames", False):
-            raise ValueError("Event predictor requires env.dataset.include_previous_frames=true")
-        from tracka.common import load_checkpoint
-        checkpoint = load_checkpoint(encoder_path)
-        if checkpoint.get("schema_version") != "tracka-event-v1":
-            raise ValueError("Event predictor requires a tracka-event-v1 checkpoint")
-        expected_step = cfg.encoder.get("expected_step")
-        if expected_step is not None and checkpoint.get("global_step") != expected_step:
-            raise ValueError(f"Expected Event step {expected_step}, got {checkpoint.get('global_step')}")
-        expected_hash = cfg.encoder.get("expected_sha256")
-        if expected_hash is not None:
-            from tracka.common import file_hash
-            if file_hash(encoder_path) != expected_hash:
-                raise ValueError("Event checkpoint SHA-256 mismatch")
-        model_cfg = checkpoint["config"]["model"]
-        if model_cfg["image_size"] != cfg.img_size or model_cfg["patch_size"] != 16:
-            raise ValueError("Event image size and 16-pixel patch grid must match PushT predictor")
+    checkpoint_path = cfg.encoder.get("checkpoint_path")
+    if event_encoder and not cfg.env.dataset.get("include_previous_frames", False):
+        raise ValueError("Event predictor requires env.dataset.include_previous_frames=true")
+    if checkpoint_path is None:
+        if not event_encoder or not cfg.model.train_encoder or scope != "full":
+            raise ValueError("Scratch Event predictor requires full joint encoder training")
+        if cfg.encoder.get("expected_step") is not None or cfg.encoder.get("expected_sha256") is not None:
+            raise ValueError("Scratch Event predictor cannot expect a pretrained checkpoint")
+        model_cfg = cfg.encoder.get("model_config")
+        if model_cfg is None:
+            raise ValueError("Scratch Event predictor requires encoder.model_config")
+    else:
+        encoder_path = Path(checkpoint_path)
+        if not encoder_path.is_absolute():
+            raise ValueError("Track A encoder checkpoint path must be absolute")
+        if not encoder_path.is_file():
+            raise FileNotFoundError(f"Track A encoder checkpoint not found: {encoder_path}")
+        if event_encoder:
+            from tracka.common import load_checkpoint
+            checkpoint = load_checkpoint(encoder_path)
+            if checkpoint.get("schema_version") != "tracka-event-v1":
+                raise ValueError("Event predictor requires a tracka-event-v1 checkpoint")
+            expected_step = cfg.encoder.get("expected_step")
+            if expected_step is not None and checkpoint.get("global_step") != expected_step:
+                raise ValueError(f"Expected Event step {expected_step}, got {checkpoint.get('global_step')}")
+            expected_hash = cfg.encoder.get("expected_sha256")
+            if expected_hash is not None:
+                from tracka.common import file_hash
+                if file_hash(encoder_path) != expected_hash:
+                    raise ValueError("Event checkpoint SHA-256 mismatch")
+            model_cfg = checkpoint["config"]["model"]
+    if event_encoder and (model_cfg["image_size"] != cfg.img_size or model_cfg["patch_size"] != 16):
+        raise ValueError("Event image size and 16-pixel patch grid must match PushT predictor")
     data_root = Path(cfg.env.dataset.data_path)
     if not data_root.is_absolute():
         raise ValueError("DATASET_DIR must resolve to an absolute path")
