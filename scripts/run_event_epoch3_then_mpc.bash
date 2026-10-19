@@ -5,7 +5,18 @@
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# sbatch runs a spool copy of this script, so BASH_SOURCE is not in the repo.
+# Our submit command sets --chdir to the repository; REPO_DIR can override it.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  REPO="${REPO_DIR:-$PWD}"
+else
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+REPO="$(cd "$REPO" && pwd -P)"
+[[ -f "$REPO/train.py" && -f "$REPO/scripts/run_event_mpc_matrix.bash" ]] || {
+  echo "Repository not found at $REPO; submit with --chdir=/absolute/path/to/adajepa" >&2
+  exit 2
+}
 cd "$REPO"
 MODEL_DIR="${1:?Usage: run_event_epoch3_then_mpc.sh ABSOLUTE_MODEL_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-/home/j/jinwoo/miniforge3/envs/ts/bin/python}"

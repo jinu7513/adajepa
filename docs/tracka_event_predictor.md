@@ -111,7 +111,8 @@ MODEL_DIR="$PWD/checkpoints/event_joint_seed0"
 export EVAL_ROOT="$PWD/eval_outputs/event_joint_seed0"
 export VARIANT=event-joint-seed0
 sbatch --partition="$CIRCE_PARTITION" --gres=gpu:1 --cpus-per-task=8 \
-  --mem=64G --time="$CIRCE_TIME" --output="$PWD/slurm_logs/event-mpc-%j.out" \
+  --mem=64G --time="$CIRCE_TIME" --chdir="$PWD" \
+  --output="$PWD/slurm_logs/event-mpc-%j.out" \
   scripts/run_event_mpc_matrix.bash "$MODEL_DIR"
 ```
 
@@ -126,7 +127,8 @@ export EVAL_ROOT="$PWD/eval_outputs/original_adajepa_seed100"
 export VARIANT=original-adajepa
 MODEL_DIR="$PWD/checkpoints/pusht_visual_shift"
 sbatch --partition="$CIRCE_PARTITION" --gres=gpu:1 --cpus-per-task=8 \
-  --mem=64G --time="$CIRCE_TIME" --output="$PWD/slurm_logs/original-mpc-%j.out" \
+  --mem=64G --time="$CIRCE_TIME" --chdir="$PWD" \
+  --output="$PWD/slurm_logs/original-mpc-%j.out" \
   scripts/run_event_mpc_matrix.bash "$MODEL_DIR"
 ```
 
@@ -179,6 +181,12 @@ interactive SSH command is **not** automatically made disconnect-safe by this
 script; submit it with site-approved GPU partition, QOS, CPU, memory, and
 walltime options via `sbatch`. The batch script reuses the same Hydra output
 directory and W&B training run ID, and fails fast if the smoke test fails.
+Submit from the repository with `--chdir="$PWD"`: Slurm executes a spool copy
+of the batch script, so its own file location is not the repository. The
+scripts resolve the repository from the job working directory (or an explicit
+`REPO_DIR`) when running under Slurm. A failed preflight leaves the completed
+epoch-2 checkpoint untouched; after fixing the cause, submit a new job ID
+against the same model directory, but use a new evaluation output directory.
 
 On CIRCE, the following script verifies the Event checkpoint, resumes it to
 10,000 updates if necessary, runs CPU integration tests, runs a 2-trajectory

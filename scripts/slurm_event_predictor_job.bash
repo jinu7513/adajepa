@@ -9,7 +9,13 @@ export TRACKA_EVENT_ENCODER_CKPT="$3"
 export DATASET_DIR="$4"
 PYTHON_BIN="$5"
 TARGET_EPOCHS="$6"
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# sbatch executes a spool copy of this file; its dirname is not the repo.
+REPO="${REPO_DIR:-$PWD}"
+REPO="$(cd "$REPO" && pwd -P)"
+[[ -f "$REPO/train.py" ]] || {
+  echo "Repository not found at $REPO; submit with --chdir=/absolute/path/to/adajepa" >&2
+  exit 2
+}
 cd "$REPO"
 case "$EXPERIMENT" in
   A) RECIPE=event_frozen; TRAIN_ENCODER=false; SCOPE=frozen ;;
