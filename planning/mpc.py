@@ -84,6 +84,20 @@ class MPCPlanner(BasePlanner):
     def _post_env_feedback(self, taken_actions, e_obses):
         """Hook after each env rollout; subclasses may adapt the model here.
         Returns an optional dict of extra logs for this iteration."""
+        if getattr(self.wm.predictor, "uses_transition_film", False):
+            stride = self.evaluator.frameskip
+            actions_taken = taken_actions.shape[1]
+            endpoint = (self.iter + 1) * actions_taken * stride
+            pair = {
+                key: values[:, [endpoint - stride, endpoint]]
+                for key, values in e_obses.items()
+            }
+            transformed = self.preprocessor.transform_obs(pair)
+            device = next(self.wm.parameters()).device
+            transformed = {key: value.to(device) for key, value in transformed.items()}
+            self.wm.set_observed_transition(
+                transformed, taken_actions[:, -1:].to(device)
+            )
         return None
 
     def plan(self, obs_0, obs_g, actions=None):
@@ -93,6 +107,8 @@ class MPCPlanner(BasePlanner):
             actions: (B, T, action_dim) torch.Tensor
         """
         n_evals = obs_0["visual"].shape[0]
+        if hasattr(self.wm, "clear_observed_transition"):
+            self.wm.clear_observed_transition()
         self.is_success = np.zeros(n_evals, dtype=bool)
         self.action_len = np.full(n_evals, np.inf)
         self.iter = 0

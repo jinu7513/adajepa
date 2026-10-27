@@ -106,8 +106,7 @@ class PushTDataset(TrajDataset):
         return torch.cat(result, dim=0)
 
     def get_frames(self, idx, frames):
-        vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
+        reader = VideoReader(str(self._video_path(idx, frames)), num_threads=1)
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
         proprio = self.proprios[idx, frames]
@@ -120,6 +119,9 @@ class PushTDataset(TrajDataset):
             image = self.transform(image)
         obs = {"visual": image, "proprio": proprio}
         return obs, act, state, {'shape': shape}
+
+    def _video_path(self, idx, frames):
+        return self.data_path / "obses" / f"episode_{idx:03d}.mp4"
 
     def __getitem__(self, idx):
         return self.get_frames(idx, range(self.get_seq_length(idx)))
@@ -134,6 +136,30 @@ class PushTDataset(TrajDataset):
             return rearrange(imgs, "b h w c -> b c h w") / 255.0
 
 
+class ColorPushTDataset(PushTDataset):
+    """Same physical episodes/actions; deterministic window-level color draws.
+
+    Coloring videos are generated separately from saved states. The window
+    color does not depend on DataLoader worker order, so B and C see exactly
+    the same physical windows and color choices under a common seed.
+    """
+
+    def __init__(self, *, color_domains, **kwargs):
+        super().__init__(**kwargs)
+        self.color_domains = tuple(color_domains)
+        if len(self.color_domains) != 3 or len(set(self.color_domains)) != 3:
+            raise ValueError("ColorPushTDataset requires exactly three distinct domains")
+
+    def _video_path(self, idx, frames):
+        start = frames.start if isinstance(frames, range) else int(frames[0])
+        # Stable arithmetic instead of Python's process-randomized hash().
+        domain = self.color_domains[(idx * 1009 + start) % len(self.color_domains)]
+        path = self.data_path / "colors" / domain / "obses" / f"episode_{idx:03d}.mp4"
+        if not path.is_file():
+            raise FileNotFoundError(f"Paired-color video missing: {path}")
+        return path
+
+
 def load_pusht_slice_train_val(
     transform,
     n_rollout=50,
@@ -144,20 +170,25 @@ def load_pusht_slice_train_val(
     num_pred=0,
     frameskip=0,
     with_velocity=True,
+    color_domains=None,
 ):
-    train_dset = PushTDataset(
+    dataset_type = ColorPushTDataset if color_domains is not None else PushTDataset
+    color_kwargs = {"color_domains": color_domains} if color_domains is not None else {}
+    train_dset = dataset_type(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path + "/train",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        **color_kwargs,
     )
-    val_dset = PushTDataset(
+    val_dset = dataset_type(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path + "/val",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        **color_kwargs,
     )
 
     num_frames = num_hist + num_pred

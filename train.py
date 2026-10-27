@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import hydra
 import torch
 import wandb
@@ -104,14 +105,14 @@ class Trainer:
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
                 self.wandb_run = wandb.init(
-                    project=f"temporal_straightening_{self.cfg.env.name}",
+                    project=self.cfg.get("wandb_project", f"temporal_straightening_{self.cfg.env.name}"),
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
                 )
             else:
                 self.wandb_run = wandb.init(
-                    project=f"temporal_straightening_{self.cfg.env.name}",
+                    project=self.cfg.get("wandb_project", f"temporal_straightening_{self.cfg.env.name}"),
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
@@ -119,7 +120,7 @@ class Trainer:
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
-            wandb.run.name = "{}".format(model_name)
+            wandb.run.name = self.cfg.get("wandb_run_name", model_name)
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -171,10 +172,11 @@ class Trainer:
             "epoch",
         ]
         self._keys_to_save += (
-            ["encoder", "encoder_optimizer"] if self.train_encoder else []
+            ["encoder", "encoder_optimizer"] if self.train_encoder else
+            (["encoder"] if self.cfg.training.get("save_frozen_encoder", False) else [])
         )
         self._keys_to_save += (
-            ["predictor", "predictor_optimizer"]
+            ["predictor", "predictor_optimizer", "action_encoder_optimizer"]
             if self.train_predictor and self.cfg.has_predictor
             else []
         )
@@ -238,8 +240,14 @@ class Trainer:
                     ckpt[k] = self.accelerator.unwrap_model(v)
                 else:
                     ckpt[k] = v
-            torch.save(ckpt, "checkpoints/model_latest.pth")
-            torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
+            latest_path = Path("checkpoints/model_latest.pth")
+            epoch_path = Path(f"checkpoints/model_{self.epoch}.pth")
+            latest_tmp = latest_path.with_suffix(".pth.tmp")
+            epoch_tmp = epoch_path.with_suffix(".pth.tmp")
+            torch.save(ckpt, latest_tmp)
+            os.replace(latest_tmp, latest_path)
+            torch.save(ckpt, epoch_tmp)
+            os.replace(epoch_tmp, epoch_path)
             log.info("Saved model to {}".format(os.getcwd()))
             ckpt_path = os.path.join(os.getcwd(), f"checkpoints/model_{self.epoch}.pth")
         else:
@@ -262,9 +270,23 @@ class Trainer:
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+        source_predictor = None
         if model_ckpt.exists():
             self.load_ckpt(model_ckpt)
             log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+        elif self.cfg.training.get("initial_checkpoint", None):
+            source_path = Path(self.cfg.training.initial_checkpoint)
+            if not source_path.is_file():
+                raise FileNotFoundError(f"Initial AdaJEPA checkpoint missing: {source_path}")
+            source = torch.load(source_path, map_location="cpu", weights_only=False)
+            required = {"encoder", "predictor", "action_encoder", "proprio_encoder"}
+            if required - source.keys():
+                raise ValueError(f"Initial checkpoint lacks {sorted(required - source.keys())}")
+            self.encoder = source["encoder"]
+            self.action_encoder = source["action_encoder"]
+            self.proprio_encoder = source["proprio_encoder"]
+            source_predictor = source["predictor"]
+            log.info("Initialized AdaJEPA components from %s", source_path)
 
         # initialize encoder
         if self.encoder is None:
@@ -282,20 +304,22 @@ class Trainer:
             )
         self._configure_encoder_trainability()
 
-        self.proprio_encoder = hydra.utils.instantiate(
-            self.cfg.proprio_encoder,
-            in_chans=self.datasets["train"].proprio_dim,
-            emb_dim=self.cfg.proprio_emb_dim,
-        )
+        if self.proprio_encoder is None:
+            self.proprio_encoder = hydra.utils.instantiate(
+                self.cfg.proprio_encoder,
+                in_chans=self.datasets["train"].proprio_dim,
+                emb_dim=self.cfg.proprio_emb_dim,
+            )
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
         self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
 
-        self.action_encoder = hydra.utils.instantiate(
-            self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim,
-            emb_dim=self.cfg.action_emb_dim,
-        )
+        if self.action_encoder is None:
+            self.action_encoder = hydra.utils.instantiate(
+                self.cfg.action_encoder,
+                in_chans=self.datasets["train"].action_dim,
+                emb_dim=self.cfg.action_emb_dim,
+            )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 
@@ -318,17 +342,31 @@ class Trainer:
 
         if self.cfg.has_predictor:
             if self.predictor is None:
-                self.predictor = hydra.utils.instantiate(
-                    self.cfg.predictor,
-                    num_patches=num_patches,
-                    num_frames=self.cfg.num_hist,
-                    dim=self.encoder.emb_dim
-                    + (
-                        proprio_emb_dim * self.cfg.num_proprio_repeat
-                        + action_emb_dim * self.cfg.num_action_repeat
+                is_film = str(self.cfg.predictor._target_).endswith("TransitionFiLMPredictor")
+                if source_predictor is not None and not is_film:
+                    self.predictor = source_predictor
+                else:
+                    predictor_kwargs = {}
+                    if is_film:
+                        predictor_kwargs["visual_dim"] = self.encoder.emb_dim
+                        predictor_kwargs["action_dim"] = action_emb_dim * self.cfg.num_action_repeat
+                    self.predictor = hydra.utils.instantiate(
+                        self.cfg.predictor,
+                        num_patches=num_patches,
+                        num_frames=self.cfg.num_hist,
+                        dim=self.encoder.emb_dim
+                        + (
+                            proprio_emb_dim * self.cfg.num_proprio_repeat
+                            + action_emb_dim * self.cfg.num_action_repeat
+                        ) * self.cfg.concat_dim,
+                        **predictor_kwargs,
                     )
-                    * (self.cfg.concat_dim),
-                )
+                    if source_predictor is not None:
+                        missing, unexpected = self.predictor.load_state_dict(
+                            source_predictor.state_dict(), strict=False
+                        )
+                        if unexpected or any(not key.startswith(("context_net.", "film.")) for key in missing):
+                            raise ValueError(f"Predictor initialization mismatch: missing={missing}, unexpected={unexpected}")
             if not self.train_predictor:
                 for param in self.predictor.parameters():
                     param.requires_grad = False
@@ -817,7 +855,7 @@ class Trainer:
                         obs[k][:n_past].unsqueeze(0).to(self.device)
                     )  # unsqueeze for batch, (b, t, c, h, w)
 
-                z_obses, z = self.model.rollout(obs_0, actions)
+                z_obses, z = self.model.rollout(obs_0, actions, known_observed_actions=True)
                 z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
@@ -868,6 +906,8 @@ class Trainer:
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
+            with open("epoch_metrics.jsonl", "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(epoch_log) + "\n")
         self.epoch_log = OrderedDict()
 
     def logs_flash_iter(self, iteration):

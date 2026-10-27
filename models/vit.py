@@ -55,7 +55,7 @@ class Attention(nn.Module):
             nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
-        self.bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES).to('cuda')
+        self.register_buffer("bias", generate_mask_matrix(NUM_PATCHES, NUM_FRAMES), persistent=False)
 
     def forward(self, x):
         (
@@ -70,7 +70,7 @@ class Attention(nn.Module):
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         # apply causal mask
-        dots = dots.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        dots = dots.masked_fill(self.bias[:, :, :T, :T].to(dots.device) == 0, float("-inf"))
 
         attn = self.attend(dots)
         attn = self.dropout(attn)
@@ -118,3 +118,60 @@ class ViTPredictor(nn.Module):
         x = self.dropout(x) 
         x = self.transformer(x) 
         return x
+
+
+class TransitionFiLMPredictor(ViTPredictor):
+    """Identity-initialized, per-frame FiLM on the final two predictor blocks.
+
+    Context is supplied by VWorldModel, which knows which transitions were
+    observed. In particular this module never manufactures context from its
+    own imagined output during MPC optimization.
+    """
+
+    uses_transition_film = True
+
+    def __init__(self, *, visual_dim, action_dim, context_dim=128, **kwargs):
+        super().__init__(**kwargs)
+        self.num_patches = int(kwargs["num_patches"])
+        dim = int(kwargs["dim"])
+        self.context_input_dim = 2 * int(visual_dim) + int(action_dim)
+        self.context_net = nn.Sequential(
+            nn.LayerNorm(self.context_input_dim),
+            nn.Linear(self.context_input_dim, context_dim),
+            nn.GELU(),
+            nn.Linear(context_dim, context_dim),
+        )
+        self.film = nn.ModuleDict()
+        depth = len(self.transformer.layers)
+        for layer_idx in range(max(0, depth - 2), depth):
+            projection = nn.Linear(context_dim, 2 * dim)
+            nn.init.zeros_(projection.weight)
+            nn.init.zeros_(projection.bias)
+            self.film[str(layer_idx)] = projection
+
+    def forward(self, x, transition_context=None, context_valid=None):
+        batch, token_count, dim = x.shape
+        if token_count % self.num_patches:
+            raise ValueError("Predictor token count is not divisible by patches/frame")
+        frames = token_count // self.num_patches
+        if transition_context is None:
+            transition_context = x.new_zeros(batch, frames, self.context_input_dim)
+        if context_valid is None:
+            context_valid = x.new_zeros(batch, frames, dtype=torch.bool)
+        if transition_context.shape != (batch, frames, self.context_input_dim):
+            raise ValueError("Transition context has the wrong batch/time/features shape")
+        if context_valid.shape != (batch, frames):
+            raise ValueError("Transition validity has the wrong batch/time shape")
+        context = self.context_net(transition_context)
+        x = self.dropout(x + self.pos_embedding[:, :token_count])
+        for layer_idx, (attn, ff) in enumerate(self.transformer.layers):
+            x = attn(x) + x
+            x = ff(x) + x
+            projection = self.film[str(layer_idx)] if str(layer_idx) in self.film else None
+            if projection is not None:
+                gamma, beta = projection(context).chunk(2, dim=-1)
+                mask = context_valid.to(dtype=x.dtype).unsqueeze(-1)
+                x = x.reshape(batch, frames, self.num_patches, dim)
+                x = (1 + (gamma * mask).unsqueeze(2)) * x + (beta * mask).unsqueeze(2)
+                x = x.reshape(batch, token_count, dim)
+        return self.transformer.norm(x)

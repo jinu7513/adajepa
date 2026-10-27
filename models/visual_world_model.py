@@ -42,6 +42,7 @@ class VWorldModel(nn.Module):
         self.action_encoder = action_encoder
         self.decoder = decoder  # decoder could be None
         self.predictor = predictor  # predictor could be None
+        self._observed_transition_context = None
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
@@ -118,14 +119,14 @@ class VWorldModel(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if self.train_encoder:
-            self.encoder.train(mode)
+        self.encoder.train(mode if self.train_encoder else False)
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
         self.proprio_encoder.train(mode)
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
+        return self
 
     def eval(self):
         super().eval()
@@ -136,6 +137,7 @@ class VWorldModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
+        return self
 
     def encode(self, obs, act): 
         """
@@ -182,16 +184,57 @@ class VWorldModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
-    def predict(self, z):  # in embedding space
+    def _transition_context(self, z):
+        """Causal observed-window context; slot i uses transition i-1 -> i."""
+        if self.concat_dim != 1:
+            raise ValueError("Transition FiLM currently requires concat_dim=1")
+        visual_dim = z.shape[-1] - self.proprio_dim - self.action_dim
+        visual = z[..., :visual_dim].mean(dim=2)
+        action = z[:, :, 0, -self.action_dim:]
+        batch, frames = z.shape[:2]
+        context = z.new_zeros(batch, frames, 2 * visual_dim + self.action_dim)
+        valid = torch.zeros(batch, frames, dtype=torch.bool, device=z.device)
+        if frames > 1:
+            context[:, 1:] = torch.cat(
+                [visual[:, :-1], action[:, :-1], visual[:, 1:]], dim=-1
+            )
+            valid[:, 1:] = True
+        return context, valid
+
+    def clear_observed_transition(self):
+        self._observed_transition_context = None
+
+    @torch.no_grad()
+    def set_observed_transition(self, observed_pair, executed_action_chunk):
+        """Cache only an actually executed chunk and the two real endpoint images."""
+        if not getattr(self.predictor, "uses_transition_film", False):
+            return
+        if observed_pair["visual"].shape[1] != 2 or executed_action_chunk.shape[1] != 1:
+            raise ValueError("Expected two real frames and one executed action chunk")
+        encoded = self.encode_obs(observed_pair)["visual"].mean(dim=2)
+        action = self.encode_act(executed_action_chunk)[:, 0]
+        self._observed_transition_context = torch.cat(
+            [encoded[:, 0], action, encoded[:, 1]], dim=-1
+        ).detach()
+
+    def predict(self, z, *, transition_context=None, context_valid=None):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
         """
         T = z.shape[1]
         # reshape to a batch of windows of inputs
+        if getattr(self.predictor, "uses_transition_film", False):
+            if transition_context is not None:
+                context, valid = transition_context, context_valid
+            else:
+                context, valid = self._transition_context(z)
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
-        z = self.predictor(z)
+        if getattr(self.predictor, "uses_transition_film", False):
+            z = self.predictor(z, context, valid)
+        else:
+            z = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
         return z
 
@@ -407,7 +450,7 @@ class VWorldModel(nn.Module):
         return z
 
 
-    def rollout(self, obs_0, act):
+    def rollout(self, obs_0, act, *, known_observed_actions=False):
         """
         input:  obs_0 (dict): (b, n, 3, img_size, img_size)
                   act: (b, t+n, action_dim)
@@ -419,16 +462,47 @@ class VWorldModel(nn.Module):
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 
         z = self.encode(obs_0, act_0)
+        if getattr(self.predictor, "uses_transition_film", False):
+            if known_observed_actions:
+                contexts, validity = self._transition_context(z)
+            else:
+                contexts = z.new_zeros(z.shape[0], z.shape[1], self.predictor.context_input_dim)
+                validity = torch.zeros(z.shape[:2], dtype=torch.bool, device=z.device)
+            cached = self._observed_transition_context
+            if cached is not None:
+                if cached.shape[0] != z.shape[0]:
+                    raise ValueError("Observed context batch does not match MPC candidates")
+                contexts[:, 0] = cached.to(z.device)
+                validity[:, 0] = True
+            latest_context = contexts[:, -1:].clone()
+            latest_valid = validity[:, -1:].clone()
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist :])
+            if getattr(self.predictor, "uses_transition_film", False):
+                z_pred = self.predict(
+                    z[:, -self.num_hist :],
+                    transition_context=contexts[:, -self.num_hist :],
+                    context_valid=validity[:, -self.num_hist :],
+                )
+            else:
+                z_pred = self.predict(z[:, -self.num_hist :])
             z_new = z_pred[:, -inc:, ...]
             z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
             z = torch.cat([z, z_new], dim=1)
+            if getattr(self.predictor, "uses_transition_film", False):
+                contexts = torch.cat([contexts, latest_context], dim=1)
+                validity = torch.cat([validity, latest_valid], dim=1)
             t += inc
 
-        z_pred = self.predict(z[:, -self.num_hist :])
+        if getattr(self.predictor, "uses_transition_film", False):
+            z_pred = self.predict(
+                z[:, -self.num_hist :],
+                transition_context=contexts[:, -self.num_hist :],
+                context_valid=validity[:, -self.num_hist :],
+            )
+        else:
+            z_pred = self.predict(z[:, -self.num_hist :])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, z_acts = self.separate_emb(z)

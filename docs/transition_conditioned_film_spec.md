@@ -1,6 +1,8 @@
 # Transition-conditioned FiLM for deterministic AdaJEPA: implementation specification
 
-Status: design for review; no model or dataset code has been changed yet.
+Status: first-pass implementation and CIRCE Slurm DAG added. The code still
+requires a smoke test against the released checkpoint and full dataset on
+CIRCE before any research result is claimed.
 
 Branch: `transition-conditioned-film`, based on `main` at `66c5f18`. This is a
 separate worktree from the existing Event-encoder experiments. Do not alter or

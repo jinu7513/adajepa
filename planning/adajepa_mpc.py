@@ -125,6 +125,7 @@ class AdaJEPAMPCPlanner(MPCPlanner):
 
     def _post_env_feedback(self, taken_actions, e_obses):
         """Adapt the world model on the newly executed segment (MPC-loop hook)."""
+        super()._post_env_feedback(taken_actions, e_obses)
         obs_seq, act_seq = self._extract_adajepa_data(e_obses, taken_actions, self.iter)
         self._obs_buffer.append(obs_seq)
         self._act_buffer.append(act_seq)

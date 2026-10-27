@@ -117,11 +117,20 @@ class PlanEvaluator:  # evaluator for planning
         trans_obs_g = move_to_device(
             self.preprocessor.transform_obs(self.obs_g), self.device
         )
+        # This diagnostic replays actions from the *initial* state. A context
+        # gathered at the current MPC step would be future information here.
+        observed_context = getattr(self.wm, "_observed_transition_context", None)
+        if hasattr(self.wm, "clear_observed_transition"):
+            self.wm.clear_observed_transition()
         with torch.no_grad():
-            i_z_obses, _ = self.wm.rollout(
-                obs_0=trans_obs_0,
-                act=actions,
-            )
+            try:
+                i_z_obses, _ = self.wm.rollout(
+                    obs_0=trans_obs_0,
+                    act=actions,
+                )
+            finally:
+                if hasattr(self.wm, "_observed_transition_context"):
+                    self.wm._observed_transition_context = observed_context
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
         # rollout in env
