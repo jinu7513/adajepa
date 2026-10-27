@@ -740,6 +740,11 @@ def planning_main(cfg_dict):
         Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
     )
     model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
+    support_k_override = cfg_dict.get("support_k_override")
+    if support_k_override is not None:
+        if not hasattr(model, "set_active_support_k"):
+            raise ValueError("support_k_override requires a support-conditioned checkpoint")
+        model.set_active_support_k(int(support_k_override))
     t_after_model = time.perf_counter()
     print(f"[timing] setup_model_s={t_after_model - t_start:.3f}", flush=True)
 

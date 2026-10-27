@@ -1,0 +1,20 @@
+# Independent support-conditioned experiment; the released AdaJEPA checkpoint is never modified.
+seed: 0
+epochs: 3
+batch_size: 8
+gradient_accumulation: 4
+num_workers: 4
+learning_rate: 0.0005
+weight_decay: 0.0
+max_grad_norm: 1.0
+precision: bf16
+context_dim: 128
+film_layers: 2
+feature_mode: delta
+affine_type: mlp
+train_base_predictor: false
+identity_only: false
+support_k_values: [0, 2, 4, 8]
+validation_batches: 100
+save_every_batches: 1000
+wandb_project: adajepa_transition_support

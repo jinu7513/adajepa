@@ -84,7 +84,17 @@ class MPCPlanner(BasePlanner):
     def _post_env_feedback(self, taken_actions, e_obses):
         """Hook after each env rollout; subclasses may adapt the model here.
         Returns an optional dict of extra logs for this iteration."""
-        if getattr(self.wm.predictor, "uses_transition_film", False):
+        if getattr(self.wm.predictor, "uses_support_film", False):
+            stride = self.evaluator.frameskip
+            actions_taken = taken_actions.shape[1]
+            first = self.iter * actions_taken * stride
+            endpoints = [first + index * stride for index in range(actions_taken + 1)]
+            actual = {key: values[:, endpoints] for key, values in e_obses.items()}
+            transformed = self.preprocessor.transform_obs(actual)
+            device = next(self.wm.parameters()).device
+            transformed = {key: value.to(device) for key, value in transformed.items()}
+            self.wm.observe_rollout(transformed, taken_actions.to(device))
+        elif getattr(self.wm.predictor, "uses_transition_film", False):
             stride = self.evaluator.frameskip
             actions_taken = taken_actions.shape[1]
             endpoint = (self.iter + 1) * actions_taken * stride

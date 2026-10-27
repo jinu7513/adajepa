@@ -137,6 +137,16 @@ The shape and maze checkpoints ship the VQVAE decoder that was co-trained with t
 
 ## Acknowledgement
 
+## Transition-conditioned PushT experiment on CIRCE
+
+For the released AdaJEPA baseline, earlier three-color A/B/C experiment,
+and the causal K-transition support/FiLM ablation matrix, see the
+[full Slurm reproduction and resume guide](docs/transition_support_slurm.md).
+The guide also distinguishes offline latent prediction from closed-loop
+PushT success and shows how to inspect W&B and persistent CSV outputs.
+
+## Acknowledgement
+
 This repository builds on [temporal-straightening](https://github.com/agentic-learning-ai-lab/temporal-straightening) and [DINO-WM](https://github.com/gaoyuezhou/dino_wm). We are grateful to the authors for sharing open-source implementations.
 
 ## Citation

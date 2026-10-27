@@ -120,6 +120,10 @@ class PlanEvaluator:  # evaluator for planning
         # This diagnostic replays actions from the *initial* state. A context
         # gathered at the current MPC step would be future information here.
         observed_context = getattr(self.wm, "_observed_transition_context", None)
+        support_state = (
+            self.wm.get_observed_support_state()
+            if hasattr(self.wm, "get_observed_support_state") else None
+        )
         if hasattr(self.wm, "clear_observed_transition"):
             self.wm.clear_observed_transition()
         with torch.no_grad():
@@ -131,6 +135,8 @@ class PlanEvaluator:  # evaluator for planning
             finally:
                 if hasattr(self.wm, "_observed_transition_context"):
                     self.wm._observed_transition_context = observed_context
+                if support_state is not None:
+                    self.wm.restore_observed_support_state(support_state)
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
         # rollout in env

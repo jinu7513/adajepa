@@ -160,6 +160,20 @@ class ColorPushTDataset(PushTDataset):
         return path
 
 
+class FixedColorPushTDataset(PushTDataset):
+    """Evaluation-only fixed appearance; never selected by the train loader."""
+
+    def __init__(self, *, color_domain, **kwargs):
+        super().__init__(**kwargs)
+        self.color_domain = str(color_domain)
+
+    def _video_path(self, idx, frames):
+        path = self.data_path / "colors" / self.color_domain / "obses" / f"episode_{idx:03d}.mp4"
+        if not path.is_file():
+            raise FileNotFoundError(f"Evaluation color video missing: {path}")
+        return path
+
+
 def load_pusht_slice_train_val(
     transform,
     n_rollout=50,
