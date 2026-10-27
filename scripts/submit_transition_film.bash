@@ -38,8 +38,8 @@ import torch
 from omegaconf import OmegaConf
 root = sys.argv[1]
 cfg = OmegaConf.load(root + "/hydra.yaml")
-if cfg.env.name != "pusht":
-    raise SystemExit("Source checkpoint is not a PushT model")
+if cfg.env.name not in ("pusht", "pushobj"):
+    raise SystemExit(f"Source checkpoint is not a PushT model (env.name={cfg.env.name!r})")
 if (int(cfg.num_hist), int(cfg.num_pred), int(cfg.frameskip), int(cfg.concat_dim)) != (3, 1, 5, 1):
     raise SystemExit("Released model temporal/action layout differs from this experiment")
 ckpt = torch.load(root + "/checkpoints/model_latest.pth", map_location="cpu", weights_only=False)
