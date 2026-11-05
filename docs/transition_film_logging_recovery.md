@@ -20,9 +20,11 @@ still read it and verify commit `612b0b3`.
 
 ```bash
 cd /home/j/jinwoo
-git clone --branch transition-film-logging-fix \
-  "$(git -C /home/j/jinwoo/adajepa-transition-film remote get-url origin)" \
-  /home/j/jinwoo/adajepa-transition-film-logging-fix
+cd /home/j/jinwoo/adajepa-transition-film
+REPO_URL="$(git config --get remote.origin.url)"
+cd /home/j/jinwoo
+git clone --branch transition-film-logging-fix "$REPO_URL" \
+  adajepa-transition-film-logging-fix
 cd /home/j/jinwoo/adajepa-transition-film-logging-fix
 export PYTHON_BIN=/home/j/jinwoo/miniforge3/envs/ts/bin/python
 export DATASET_DIR=/home/j/jinwoo/adajepa/data_full

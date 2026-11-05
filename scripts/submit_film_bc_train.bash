@@ -16,9 +16,10 @@ for path in "$SOURCE_MODEL_DIR/hydra.yaml" "$SOURCE_MODEL_DIR/checkpoints/model_
   "$DATASET_DIR/pusht_noise/transition_color_manifest.json"; do
   [[ -f "$path" ]] || { echo "Required file missing: $path" >&2; exit 2; }
 done
-git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet || {
+(cd "$REPO" && git diff --quiet && git diff --cached --quiet) || {
   echo "Commit tracked code changes before submitting" >&2; exit 2
 }
+repo_commit="$(cd "$REPO" && git rev-parse HEAD)"
 command -v sbatch >/dev/null || { echo "sbatch unavailable; run on CIRCE" >&2; exit 2; }
 sinfo -h -p "$CIRCE_PARTITION" -o '%P' | grep -q . || {
   echo "Partition $CIRCE_PARTITION not visible in sinfo" >&2; exit 2
@@ -26,7 +27,7 @@ sinfo -h -p "$CIRCE_PARTITION" -o '%P' | grep -q . || {
 if [[ ! -e "$RUN_ROOT" ]]; then
   mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/models"
   printf 'repo=%s\ngit=%s\nsource=%s\ndataset=%s\n' \
-    "$REPO" "$(git -C "$REPO" rev-parse HEAD)" "$SOURCE_MODEL_DIR" "$DATASET_DIR" \
+    "$REPO" "$repo_commit" "$SOURCE_MODEL_DIR" "$DATASET_DIR" \
     > "$RUN_ROOT/submission.txt"
   sha256sum "$SOURCE_MODEL_DIR/hydra.yaml" \
     "$SOURCE_MODEL_DIR/checkpoints/model_latest.pth" \
@@ -37,7 +38,7 @@ else
   [[ -f "$RUN_ROOT/submission.txt" && -f "$RUN_ROOT/input_sha256.txt" && -f "$RUN_ROOT/job_ids.txt" ]] || {
     echo "Existing run root is incomplete: $RUN_ROOT" >&2; exit 2
   }
-  for entry in "repo=$REPO" "git=$(git -C "$REPO" rev-parse HEAD)" \
+  for entry in "repo=$REPO" "git=$repo_commit" \
     "source=$SOURCE_MODEL_DIR" "dataset=$DATASET_DIR"; do
     grep -Fxq "$entry" "$RUN_ROOT/submission.txt" || {
       echo "Run root was created for different inputs: $entry" >&2; exit 2

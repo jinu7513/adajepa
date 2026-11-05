@@ -29,7 +29,7 @@ def test_bc_submission_survives_quota_failure_without_duplicate_b(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     mocks = {
-        "git": '#!/bin/bash\nif [[ "$*" == *rev-parse* ]]; then echo testcommit; fi\n',
+        "git": '#!/bin/bash\nif [[ " $* " == *" -C "* ]]; then exit 2; fi\nif [[ "$*" == *rev-parse* ]]; then echo testcommit; fi\n',
         "sinfo": "#!/bin/bash\necho muma_2021\n",
         "flock": "#!/bin/bash\nexit 0\n",
         "sha256sum": "#!/bin/bash\nif [[ \"$1\" == -c ]]; then exit 0; fi\necho fixture\n",
