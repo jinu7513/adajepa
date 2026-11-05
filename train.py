@@ -885,13 +885,26 @@ class Trainer:
 
     def logs_update(self, logs):
         for key, value in logs.items():
-            if isinstance(value, torch.Tensor):
-                value = value.detach().cpu().item()
-            length = len(value)
+            # Rollout metrics can be lists of scalar tensors. Summing those
+            # directly leaves a Tensor in epoch_log, which W&B accepts but
+            # json.dumps in logs_flash cannot serialize.
+            if torch.is_tensor(value):
+                value = value.detach().cpu().reshape(-1).tolist()
+            elif isinstance(value, np.ndarray):
+                value = value.reshape(-1).tolist()
+            elif np.isscalar(value):
+                value = [value]
+            scalars = [
+                float(item.detach().cpu().item()) if torch.is_tensor(item)
+                else float(item)
+                for item in value
+            ]
+            if not scalars:
+                continue
             count, total = self.epoch_log.get(key, (0, 0.0))
             self.epoch_log[key] = (
-                count + length,
-                total + sum(value),
+                count + len(scalars),
+                total + sum(scalars),
             )
 
     def logs_flash(self, step):
