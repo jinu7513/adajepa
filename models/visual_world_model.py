@@ -179,6 +179,10 @@ class VWorldModel(nn.Module):
         visual = self.encoder_transform(visual)
         visual_embs = self.encoder.forward(visual)
         visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
+        # Installed only by the optional evaluation-time latent adapter planner.
+        adapter = getattr(self, "visual_adapter", None)
+        if adapter is not None and getattr(self, "visual_adapter_enabled", True):
+            visual_embs = adapter(visual_embs)
 
         proprio = obs['proprio']
         proprio_emb = self.encode_proprio(proprio)

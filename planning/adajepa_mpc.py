@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from .adajepa import AdaJEPATrainer
+from .latent_adapter import LatentAdapterTrainer
 from .mpc import MPCPlanner, _cuda_sync
 
 
@@ -26,16 +27,30 @@ class AdaJEPAMPCPlanner(MPCPlanner):
         adapt = dict(adapt) if adapt else {}
         self.adajepa_finetune_every = adapt.get("finetune_every", 1)
         self.replay_mode, self.replay_size = self._parse_replay_buffer(adapt.get("replay_buffer", False))
-        self.adajepa_trainer = AdaJEPATrainer(
+        trainer_kwargs = dict(
             wm=self.wm,
             lr=adapt.get("lr", 5e-4),
             steps=adapt.get("steps", 1),
             optimizer_name=adapt.get("optimizer", "adam"),
-            finetune_encoder=adapt.get("finetune_encoder", True),
-            last_layer_only=adapt.get("last_layer_only", True),
-            encoder_lr=adapt.get("encoder_lr", None),
-            encoder_last_layer_only=adapt.get("encoder_last_layer_only", True),
         )
+        mode = adapt.get("mode", "adajepa")
+        if mode in ("latent_mlp", "latent_bias"):
+            self.adajepa_trainer = LatentAdapterTrainer(
+                **trainer_kwargs,
+                kind="mlp" if mode == "latent_mlp" else "bias",
+                width=adapt.get("width", 32),
+                identity_weight=adapt.get("identity_weight", 0.01),
+            )
+        elif mode == "adajepa":
+            self.adajepa_trainer = AdaJEPATrainer(
+                **trainer_kwargs,
+                finetune_encoder=adapt.get("finetune_encoder", True),
+                last_layer_only=adapt.get("last_layer_only", True),
+                encoder_lr=adapt.get("encoder_lr", None),
+                encoder_last_layer_only=adapt.get("encoder_last_layer_only", True),
+            )
+        else:
+            raise ValueError(f"Unknown planner.adapt.mode: {mode}")
         self._adajepa_loss_records = []
         self._records = []
         self._sample_idx = 0
