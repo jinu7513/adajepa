@@ -7,7 +7,9 @@ from tracka.data import CLEAN_RGB
 from tracka.event import event_from_rgb
 from tracka.event_data import EventWindowDataset, generate_event_windows, validate_event_windows
 from tracka.event_model import EventTeacherStudent, RGBEventEncoder, representation_distance
+from tracka.event_probe import load_event_probe_reference
 from tracka.model import patchify
+from models.tracka_event_patch import TrackAEventPatchEncoder
 
 
 def small_model(**overrides):
@@ -26,6 +28,37 @@ def small_loss(**overrides):
                 sigreg_dim=16, sigreg_directions=8, sigreg_knots=5)
     loss.update(overrides)
     return loss
+
+
+def test_probe_loads_scratch_predictor_encoder_without_pretraining(tmp_path):
+    wrapper = TrackAEventPatchEncoder(model_config=small_model())
+    path = tmp_path / "model_3.pth"
+    torch.save({"encoder": wrapper, "epoch": 3}, path)
+
+    encoder, model, provenance, log_step = load_event_probe_reference(
+        path, "student", torch.device("cpu"))
+    assert isinstance(encoder, RGBEventEncoder)
+    assert model is None
+    assert provenance["source_initialization"] == "random"
+    assert log_step == {"train/epoch": 3}
+    assert all(not parameter.requires_grad for parameter in encoder.parameters())
+    with pytest.raises(ValueError, match="only the Event student"):
+        load_event_probe_reference(path, "teacher", torch.device("cpu"))
+
+
+def test_probe_keeps_pretraining_teacher_and_temporal_diagnostics(tmp_path):
+    model = EventTeacherStudent(small_model(), small_loss())
+    path = tmp_path / "checkpoint_latest.pt"
+    torch.save({"schema_version": "tracka-event-v1", "model": model.state_dict(),
+                "config": {"model": small_model(), "loss": small_loss()},
+                "global_step": 10000, "manifest_sha256": "same-data"}, path)
+
+    encoder, loaded_model, provenance, log_step = load_event_probe_reference(
+        path, "teacher", torch.device("cpu"))
+    assert encoder is loaded_model.teacher
+    assert provenance["source_kind"] == "event_pretraining"
+    assert provenance["manifest_sha256"] == "same-data"
+    assert log_step == {"train/global_step": 10000}
 
 
 def test_event_transform_shapes_polarity_and_static():

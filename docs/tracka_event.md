@@ -133,6 +133,26 @@ teacher-CLS -> `F` -> next teacher CLS, shifted student-CLS -> `F` -> next
 teacher CLS, patch prediction, and teacher-CLS persistence. These temporal
 errors use the configured representation distance, not physical state units.
 
+The same evaluator also accepts a completed Event predictor checkpoint such as
+`checkpoints/model_3.pth`. It loads the saved `TrackAEventPatchEncoder` and probes
+its final student backbone after PushT training. This is the appropriate way to
+compare experiment B (10k Event pretraining, then joint training) with experiment
+D (random encoder initialization, then joint training): use their epoch-3
+checkpoints with the same Event-window dataset, probe feature, sample cap, and
+seed. Predictor checkpoints do not contain the pretraining EMA teacher or its
+action-free temporal head `F`, so their `diagnostics.json` contains feature
+spectrum metrics but no `temporal/*` values. Only `evaluation.weights=student`
+is valid for these checkpoints.
+
+```bash
+python eval_event_encoder.py --config-name tracka_event \
+  dataset.output_path=/absolute/path/to/data/event_windows \
+  evaluation.checkpoint=/absolute/path/to/checkpoints/event_scratch_joint_seed0/checkpoints/model_3.pth \
+  evaluation.feature=global evaluation.weights=student \
+  evaluation.max_states_per_split=1000 \
+  logging.name=trackA-event-D-epoch3-global-probe logging.fallback_to_local=false
+```
+
 Fair controls require separately trained encoders with the same windows,
 training budget and seed:
 

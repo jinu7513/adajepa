@@ -18,6 +18,39 @@ from .probes import fit_probe, physical_targets, plot_results, state_metrics
 from .train import device_for, to_device, unique_output
 
 
+def load_event_probe_reference(path, weights, device):
+    """Load a pretraining checkpoint or an Event predictor's saved encoder."""
+    checkpoint = load_checkpoint(path)  # Trusted local training artifact.
+    if checkpoint.get("schema_version") == "tracka-event-v1":
+        trained = checkpoint["config"]
+        model = EventTeacherStudent(trained["model"], trained["loss"]).to(device)
+        model.load_state_dict(checkpoint["model"])
+        model.eval()
+        encoder = getattr(model, weights)
+        provenance = {"source_kind": "event_pretraining",
+                      "training_step": checkpoint["global_step"],
+                      "manifest_sha256": checkpoint["manifest_sha256"]}
+        log_step = {"train/global_step": checkpoint["global_step"]}
+    else:
+        from models.tracka_event_patch import TrackAEventPatchEncoder
+
+        wrapper = checkpoint.get("encoder")
+        if not isinstance(wrapper, TrackAEventPatchEncoder):
+            raise ValueError("Checkpoint contains neither Event pretraining nor an Event predictor encoder")
+        if weights != "student":
+            raise ValueError("Predictor checkpoints contain only the Event student encoder")
+        encoder = wrapper.backbone.to(device)
+        model = None
+        provenance = {"source_kind": "event_predictor",
+                      "training_epoch": checkpoint["epoch"],
+                      "source_initialization": wrapper.source_initialization,
+                      "source_step": wrapper.source_step}
+        log_step = {"train/epoch": checkpoint["epoch"]}
+    encoder.eval()
+    encoder.requires_grad_(False)
+    return encoder, model, provenance, log_step
+
+
 def as_tensor(image):
     return torch.from_numpy(np.array(image, copy=True)).permute(2, 0, 1).float() / 127.5 - 1
 
@@ -109,19 +142,14 @@ def evaluate_event_encoder(cfg):
     torch.set_num_threads(cfg["training"]["cpu_threads"])
     device = device_for(ec["device"])
     path = absolute(ec["checkpoint"])
-    checkpoint = load_checkpoint(path)
-    if checkpoint.get("schema_version") != "tracka-event-v1":
-        raise ValueError("Checkpoint is not an RGB/Event encoder")
-    trained = checkpoint["config"]
-    model = EventTeacherStudent(trained["model"], trained["loss"]).to(device)
-    model.load_state_dict(checkpoint["model"])
-    model.eval()
-    encoder = getattr(model, ec["weights"])
+    encoder, model, provenance, log_step = load_event_probe_reference(
+        path, ec["weights"], device)
     data = {split: EventWindowDataset(cfg["dataset"]["output_path"], split,
-                                      trained["model"]["image_size"])
+                                      encoder.image_size)
             for split in ("train", "validation", "test")}
     manifest_hash = file_hash(data["train"].root / "manifest.json")
-    if checkpoint["manifest_sha256"] != manifest_hash:
+    if (provenance["source_kind"] == "event_pretraining"
+            and provenance["manifest_sha256"] != manifest_hash):
         raise ValueError("Probe dataset differs from checkpoint training dataset")
     for dataset in data.values():
         cap = ec["max_states_per_split"]
@@ -133,9 +161,9 @@ def evaluate_event_encoder(cfg):
         raise FileExistsError("Event probe output directory is not empty")
     out.mkdir(parents=True, exist_ok=True)
     cfg["logging"]["name"] = cfg["logging"]["name"] or (
-        f"trackA-event-probe-{trained['model']['fusion']}-{ec['weights']}-{ec['feature']}")
+        f"trackA-event-probe-{provenance['source_kind']}-{encoder.fusion}-{ec['feature']}")
     metadata = {"config": cfg, "checkpoint": str(path), "checkpoint_sha256": file_hash(path),
-                "training_step": checkpoint["global_step"], "manifest_sha256": manifest_hash,
+                **provenance, "evaluation_manifest_sha256": manifest_hash,
                 "evaluated_samples": {split: [(r["trajectory_id"], r["timestep"])
                                               for r in ds.rows] for split, ds in data.items()}, **git_info()}
     with RunLogger(out, cfg["logging"], metadata) as logger:
@@ -166,7 +194,7 @@ def evaluate_event_encoder(cfg):
                              "latent_distance": float(np.sqrt(((vectors[ids] - clean["test"][ids]) ** 2).mean())),
                              "degradation": metrics["standardized_mse"] - baselines[segment], **metrics})
                 if segment == "full":
-                    logger.log({"train/global_step": checkpoint["global_step"],
+                    logger.log({**log_step,
                                 **{f"probe/{name}/{key}": value for key, value in metrics.items()
                                    if value is not None},
                                 f"event/probe_density_{name}": density})
@@ -180,9 +208,10 @@ def evaluate_event_encoder(cfg):
             for strength in grid:
                 report(f"{kind}_{strength:g}", *features("test", kind, float(strength)),
                        kind, float(strength))
-        diagnostics = temporal_diagnostics(model, test, device, ec["batch_size"])
+        diagnostics = (temporal_diagnostics(model, test, device, ec["batch_size"])
+                       if model is not None else {})
         diagnostics.update(spectrum_metrics([torch.from_numpy(clean["test"])], "collapse/probe_feature"))
-        logger.log({"train/global_step": checkpoint["global_step"], **diagnostics})
+        logger.log({**log_step, **diagnostics})
         logger.table("results", rows)
         write_json(out / "diagnostics.json", diagnostics)
         with (out / "results.csv").open("w", newline="", encoding="utf-8") as stream:
