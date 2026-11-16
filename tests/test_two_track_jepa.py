@@ -72,8 +72,8 @@ def test_paired_renders_share_actions_states_and_hold_each_color_within_window(t
     assert actions.shape == (20, 2) and torch.equal(actions, torch.ones_like(actions))
     assert torch.equal(states, torch.arange(100).reshape(20, 5))
     assert torch.equal(obs["proprio"], torch.zeros(20, 4))
-    assert obs["visual"].std() == 0
-    assert obs["visual_target"].std() == 0
+    assert torch.allclose(obs["visual"], obs["visual"][0, 0, 0, 0].expand_as(obs["visual"]))
+    assert torch.allclose(obs["visual_target"], obs["visual_target"][0, 0, 0, 0].expand_as(obs["visual_target"]))
     assert not torch.equal(obs["visual"], obs["visual_target"])
 
 
@@ -136,6 +136,7 @@ def test_cross_color_target_is_stop_gradient_but_input_encoder_updates():
     class TinyVisual(nn.Module):
         emb_dim = 4
         latent_ndim = 1
+        name = "tiny_visual"
 
         def __init__(self):
             super().__init__()
