@@ -352,7 +352,12 @@ class VWorldModel(nn.Module):
         decoder_enabled = self.decoder is not None and self.train_decoder
         z = self.encode(obs, act)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
-        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
+        if "visual_target" in obs:
+            target_obs = {"visual": obs["visual_target"], "proprio": obs["proprio"]}
+            z_target = self.encode(target_obs, act)
+        else:
+            z_target = z
+        z_tgt = z_target[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
         visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
         visual_tgt = obs['visual'][:, self.num_pred :, ...]  # (b, num_hist, 3, img_size, img_size)
 

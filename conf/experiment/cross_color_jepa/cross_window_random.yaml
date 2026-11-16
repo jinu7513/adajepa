@@ -1,0 +1,19 @@
+# @package _global_
+training:
+  research_track: cross_color_jepa
+  color_pair_mode: cross_window_random
+  gradient_mode: joint
+  encoder_eval_mode: true
+  stop_grad: true
+  vcreg: false
+  straighten: false
+  inverse_weight: 0.0
+  save_every_x_iterations: 0
+  save_every_x_epoch: 1
+  initial_checkpoint: null
+  save_frozen_encoder: true
+model:
+  train_encoder: true
+  train_predictor: true
+  train_decoder: false
+has_decoder: false

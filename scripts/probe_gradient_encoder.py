@@ -39,7 +39,10 @@ def encode_color(encoder, transform, root, split, selected, color, batch_size, d
     for start in range(0, len(selected), batch_size):
         images = []
         for episode, frame, _ in selected[start:start + batch_size]:
-            path = root / split / "colors" / color / "obses" / "episode_{:03d}.mp4".format(episode)
+            if color == "source_default":
+                path = root / split / "obses" / "episode_{:03d}.mp4".format(episode)
+            else:
+                path = root / split / "colors" / color / "obses" / "episode_{:03d}.mp4".format(episode)
             reader = VideoReader(str(path), num_threads=1)
             if frame >= len(reader):
                 raise ValueError("Video shorter than physical trajectory: {}".format(path))
@@ -58,6 +61,50 @@ def targets(selected):
     state = np.stack([item[2] for item in selected]).astype(np.float64)
     angle = state[:, 4]
     return np.column_stack([state[:, :4], np.sin(angle), np.cos(angle)])
+
+
+def contact_labels(root, split, selected):
+    """Label only agent-block geometry collisions, never wall/goal collisions."""
+    from env.pusht.pusht_env import PushTEnv
+    folder = root / split
+    shapes_path = folder / "shapes.pkl"
+    if shapes_path.exists():
+        with shapes_path.open("rb") as stream:
+            shapes = pickle.load(stream)
+    else:
+        shapes = ["T"] * (max(item[0] for item in selected) + 1)
+    labels = []
+    for episode, _, state in selected:
+        environment = PushTEnv(shape=shapes[episode], reset_to_state=state, with_velocity=False)
+        try:
+            environment.reset()
+            labels.append(int(any(
+                bool(agent_shape.shapes_collide(block_shape).points)
+                for agent_shape in environment.agent.shapes
+                for block_shape in environment.block.shapes
+            )))
+        finally:
+            environment.close()
+    return np.asarray(labels, dtype=np.int64)
+
+
+def average_precision(scores, labels):
+    positives = int(labels.sum())
+    if positives == 0:
+        return None
+    order = np.argsort(-scores, kind="stable")
+    ordered = labels[order]
+    precision = np.cumsum(ordered) / np.arange(1, len(ordered) + 1)
+    return float((precision * ordered).sum() / positives)
+
+
+def bootstrap_interval(values, aggregate, draws=500):
+    rng = np.random.default_rng(0)
+    estimates = []
+    for _ in range(draws):
+        selected = values[rng.integers(0, len(values), len(values))]
+        estimates.append(float(aggregate(selected)))
+    return [float(v) for v in np.percentile(estimates, (2.5, 97.5))]
 
 
 def fit_ridge(features, labels, alpha=1.0):
@@ -92,12 +139,21 @@ def metrics(pred, truth, features, clean=None):
               "block_angle_mae_deg": angle, "latent_std_mean": float(std.mean()),
               "latent_norm_mean": float(np.linalg.norm(features, axis=1).mean()),
               "latent_effective_rank": effective_rank}
+    agent_sq = np.sum((pred[:, :2] - truth[:, :2]) ** 2, axis=1)
+    block_sq = np.sum((pred[:, 2:4] - truth[:, 2:4]) ** 2, axis=1)
+    angle_abs = np.degrees(np.abs(np.arctan2(np.sin(delta), np.cos(delta))))
+    result["agent_rmse_ci95_px"] = bootstrap_interval(agent_sq, lambda x: np.sqrt(np.mean(x)))
+    result["block_rmse_ci95_px"] = bootstrap_interval(block_sq, lambda x: np.sqrt(np.mean(x)))
+    result["block_angle_mae_ci95_deg"] = bootstrap_interval(angle_abs, np.mean)
     if clean is not None:
         paired = np.linalg.norm(features - clean, axis=1)
         between = np.linalg.norm(clean - np.roll(clean, 1, axis=0), axis=1)
         result["same_state_color_distance"] = float(paired.mean())
         result["between_state_clean_distance"] = float(between.mean())
         result["normalized_color_distance"] = float(paired.mean() / max(between.mean(), 1e-12))
+        cosine = np.sum(features * clean, axis=1) / np.maximum(
+            np.linalg.norm(features, axis=1) * np.linalg.norm(clean, axis=1), 1e-12)
+        result["paired_cosine_mean"] = float(cosine.mean())
     return result
 
 
@@ -109,6 +165,9 @@ def main():
     parser.add_argument("--train-episodes", type=int, default=256)
     parser.add_argument("--val-episodes", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--train-colors", nargs="+", default=list(TRAIN_COLORS))
+    parser.add_argument("--eval-colors", nargs="+", default=list(EVAL_COLORS))
+    parser.add_argument("--contact-probe", action="store_true")
     args = parser.parse_args()
     if min(args.train_episodes, args.val_episodes, args.batch_size) < 2:
         raise ValueError("Episode limits and batch size must be at least 2")
@@ -123,26 +182,42 @@ def main():
     y_val = targets(val)
     x_train = np.concatenate([
         encode_color(encoder, transform, args.data_root, "train", train, color,
-                     args.batch_size, device) for color in TRAIN_COLORS])
-    fitted = fit_ridge(x_train.astype(np.float64), np.tile(y_train, (len(TRAIN_COLORS), 1)))
+                     args.batch_size, device) for color in args.train_colors])
+    fitted = fit_ridge(x_train.astype(np.float64), np.tile(y_train, (len(args.train_colors), 1)))
+    contact_fit = None
+    if args.contact_probe:
+        train_contact = contact_labels(args.data_root, "train", train)
+        val_contact = contact_labels(args.data_root, "val", val)
+        contact_fit = fit_ridge(x_train.astype(np.float64),
+                                np.tile(train_contact[:, None], (len(args.train_colors), 1)))
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     encoded = {color: encode_color(encoder, transform, args.data_root, "val", val, color,
                                    args.batch_size, device).astype(np.float64)
-               for color in EVAL_COLORS}
+               for color in args.eval_colors}
+    clean_color = args.eval_colors[0]
     results = {}
     with (output / "per_episode.jsonl").open("w", encoding="utf-8") as stream:
         for color, features in encoded.items():
             pred = predict_ridge(fitted, features)
-            results[color] = metrics(pred, y_val, features, encoded["default"] if color != "default" else None)
+            results[color] = metrics(pred, y_val, features, encoded[clean_color] if color != clean_color else None)
+            contact_score = None
+            if contact_fit is not None:
+                contact_score = predict_ridge(contact_fit, features)[:, 0]
+                results[color]["agent_block_contact_ap"] = average_precision(contact_score, val_contact)
+                results[color]["agent_block_contact_positives"] = int(val_contact.sum())
             for j, (episode, frame, _) in enumerate(val):
-                stream.write(json.dumps({"color": color, "episode": episode, "frame": frame,
-                                         "prediction": pred[j].tolist(), "target": y_val[j].tolist()}) + "\n")
+                row = {"color": color, "episode": episode, "frame": frame,
+                       "prediction": pred[j].tolist(), "target": y_val[j].tolist()}
+                if contact_score is not None:
+                    row["agent_block_contact_label"] = int(val_contact[j])
+                    row["agent_block_contact_score"] = float(contact_score[j])
+                stream.write(json.dumps(row) + "\n")
     payload = {"checkpoint": str(args.checkpoint.resolve()),
                "checkpoint_sha256": sha256(args.checkpoint),
                "data_root": str(args.data_root.resolve()),
                "train_episodes": len(train), "val_episodes": len(val),
-               "train_colors": TRAIN_COLORS, "eval_colors": EVAL_COLORS,
+               "train_colors": args.train_colors, "eval_colors": args.eval_colors,
                "ridge_alpha": 1.0, "results": results}
     (output / "results.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(results, indent=2))

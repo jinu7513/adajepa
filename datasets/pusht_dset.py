@@ -2,6 +2,8 @@ import torch
 import decord
 import pickle
 import numpy as np
+import hashlib
+import multiprocessing
 from pathlib import Path
 from einops import rearrange
 from decord import VideoReader
@@ -174,6 +176,63 @@ class FixedColorPushTDataset(PushTDataset):
         return path
 
 
+class ColorPairPushTDataset(PushTDataset):
+    """Two paired renders of one physical window, deterministic across workers."""
+
+    def __init__(self, *, color_domains, color_pair_mode, color_seed=0, **kwargs):
+        super().__init__(**kwargs)
+        self.color_domains = tuple(color_domains)
+        self.color_pair_mode = str(color_pair_mode)
+        self.color_seed = int(color_seed)
+        self.epoch_shared = multiprocessing.Value("i", 0)
+        if len(self.color_domains) != 3 or len(set(self.color_domains)) != 3:
+            raise ValueError("Exactly three distinct training colors are required")
+        if self.color_pair_mode not in ("same_fixed", "same_window_random", "cross_fixed", "cross_window_random"):
+            raise ValueError("Unknown color pair mode: {}".format(self.color_pair_mode))
+
+    def set_epoch(self, epoch):
+        self.epoch_shared.value = int(epoch)
+
+    def pair_for(self, episode, start):
+        episode, start = int(episode), int(start)
+        colors = self.color_domains
+        if self.color_pair_mode == "same_fixed":
+            color = colors[(episode * 1009 + start) % 3]
+            return color, color
+        pairs = [(a, b) for a in colors for b in colors if a != b]
+        if self.color_pair_mode == "cross_fixed":
+            return pairs[(episode * 1009 + start) % len(pairs)]
+        key = "{}:{}:{}:{}".format(self.color_seed, self.epoch_shared.value, episode, start)
+        draw = int.from_bytes(hashlib.blake2b(key.encode("ascii"), digest_size=8).digest(), "big")
+        if self.color_pair_mode == "same_window_random":
+            color = colors[draw % 3]
+            return color, color
+        return pairs[draw % len(pairs)]
+
+    def _paired_path(self, episode, color):
+        path = self.data_path / "colors" / color / "obses" / "episode_{:03d}.mp4".format(episode)
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+        return path
+
+    def _video_path(self, idx, frames):
+        start = frames.start if isinstance(frames, range) else int(frames[0])
+        return self._paired_path(idx, self.pair_for(idx, start)[0])
+
+    def get_frames(self, idx, frames):
+        obs, act, state, info = super().get_frames(idx, frames)
+        start = frames.start if isinstance(frames, range) else int(frames[0])
+        input_color, target_color = self.pair_for(idx, start)
+        if input_color == target_color:
+            obs["visual_target"] = obs["visual"].clone()
+        else:
+            reader = VideoReader(str(self._paired_path(idx, target_color)), num_threads=1)
+            target = reader.get_batch(frames) / 255.0
+            target = rearrange(target, "T H W C -> T C H W")
+            obs["visual_target"] = self.transform(target) if self.transform else target
+        return obs, act, state, info
+
+
 def load_pusht_slice_train_val(
     transform,
     n_rollout=50,
@@ -186,11 +245,18 @@ def load_pusht_slice_train_val(
     with_velocity=True,
     color_domains=None,
     validation_color_domain=None,
+    color_pair_mode=None,
+    color_seed=0,
 ):
+    if color_pair_mode is not None and color_domains is None:
+        raise ValueError("Color pair mode requires training colors")
     if validation_color_domain is not None and color_domains is None:
         raise ValueError("Held-out validation color requires color_domains for training")
-    dataset_type = ColorPushTDataset if color_domains is not None else PushTDataset
-    color_kwargs = {"color_domains": color_domains} if color_domains is not None else {}
+    dataset_type = (ColorPairPushTDataset if color_pair_mode is not None else
+                    ColorPushTDataset if color_domains is not None else PushTDataset)
+    color_kwargs = ({"color_domains": color_domains, "color_pair_mode": color_pair_mode,
+                     "color_seed": color_seed} if color_pair_mode is not None else
+                    {"color_domains": color_domains} if color_domains is not None else {})
     train_dset = dataset_type(
         n_rollout=n_rollout,
         transform=transform,

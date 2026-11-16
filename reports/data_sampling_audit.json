@@ -1,0 +1,18 @@
+{
+  "status": "pending_real_CIRCE_dataset_audit",
+  "known_from_code": {
+    "window_stride_raw_frames": 1,
+    "frameskip": 5,
+    "observed_frames_per_window": 4,
+    "sampling_with_replacement": false,
+    "drop_last": false,
+    "visits_per_window_per_completed_epoch": 1,
+    "mid_epoch_resume": false
+  },
+  "source_episodes": null,
+  "unique_physical_trajectories": null,
+  "training_windows": null,
+  "optimizer_steps_per_epoch": null,
+  "episode_window_histogram": null,
+  "appearance_pair_histograms": null
+}

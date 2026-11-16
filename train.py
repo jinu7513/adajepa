@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import json
 import hydra
@@ -22,6 +23,8 @@ from hydra.core.hydra_config import HydraConfig
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
+from models.inverse_action import InverseActionHead
+from scripts.two_track_sampling import audit_windows, appearance_counts
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 import custom_resolvers  # noqa: F401  # Registers OmegaConf resolvers at import time.
 
@@ -142,6 +145,9 @@ class Trainer:
 
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
+        if self.cfg.training.get("research_track", None) is not None and self.accelerator.is_main_process:
+            audit_windows(self.datasets["train"], self.cfg.gpu_batch_size,
+                          self.cfg.training.epochs, os.getcwd())
 
         self.dataloaders = {
             x: torch.utils.data.DataLoader(
@@ -167,6 +173,7 @@ class Trainer:
         self.proprio_encoder = None
         self.predictor = None
         self.decoder = None
+        self.inverse_head = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
@@ -191,6 +198,8 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
+        if self.cfg.training.get("inverse_weight", 0) > 0:
+            self._keys_to_save += ["inverse_head", "inverse_optimizer"]
 
         self.init_models()
         self.init_optimizers()
@@ -199,6 +208,18 @@ class Trainer:
 
     @staticmethod
     def _validate_gradient_ablation(cfg):
+        track = cfg.training.get("research_track", None)
+        inverse_weight = float(cfg.training.get("inverse_weight", 0))
+        if track == "cross_color_jepa":
+            if inverse_weight != 0 or cfg.env.dataset.get("color_pair_mode", None) is None:
+                raise ValueError("Cross-color track requires paired renders and JEPA loss only")
+        elif track == "mi_jepa":
+            if cfg.env.dataset.get("color_pair_mode", None) is not None or cfg.env.dataset.get("color_domains", None) is not None:
+                raise ValueError("MI track must not use cross-color training")
+            if inverse_weight < 0:
+                raise ValueError("inverse_weight must be nonnegative")
+        elif track is not None:
+            raise ValueError("Unknown research track: {}".format(track))
         mode = cfg.training.get("gradient_mode", None)
         if mode is None:
             return
@@ -269,6 +290,13 @@ class Trainer:
                     ckpt[k] = self.accelerator.unwrap_model(v)
                 else:
                     ckpt[k] = v
+            if self.cfg.training.get("research_track", None) is not None:
+                ckpt["rng_state"] = {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                }
             latest_path = Path("checkpoints/model_latest.pth")
             epoch_path = Path(f"checkpoints/model_{self.epoch}.pth")
             latest_tmp = latest_path.with_suffix(".pth.tmp")
@@ -291,6 +319,12 @@ class Trainer:
         for k, v in ckpt.items():
             if k.endswith("_optimizer") and isinstance(v, dict):
                 self._loaded_optim_state[k] = v
+            elif k == "rng_state":
+                random.setstate(v["python"])
+                np.random.set_state(v["numpy"])
+                torch.set_rng_state(v["torch"])
+                if v["cuda"] is not None and torch.cuda.is_available():
+                    torch.cuda.set_rng_state_all(v["cuda"])
             else:
                 self.__dict__[k] = v
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
@@ -457,8 +491,24 @@ class Trainer:
             vcreg_apply_to=self.cfg.training.get("vcreg_apply_to", "enc"),
         )
         self._log_trainable_params(self.model, "model")
+        if self.cfg.training.get("inverse_weight", 0) > 0:
+            if self.inverse_head is None:
+                self.inverse_head = InverseActionHead(
+                    visual_dim=self.encoder.emb_dim,
+                    action_dim=self.datasets["train"].action_dim,
+                    horizons=self.cfg.training.get("inverse_horizons", (1, 2, 3)),
+                )
+            self.inverse_head = self.accelerator.prepare(self.inverse_head)
+            self._log_trainable_params(self.inverse_head, "inverse_head")
 
     def init_optimizers(self):
+        if self.inverse_head is not None:
+            self.inverse_optimizer = torch.optim.AdamW(
+                self.inverse_head.parameters(), lr=self.cfg.training.get("inverse_lr", 5e-4)
+            )
+            self.inverse_optimizer = self.accelerator.prepare(self.inverse_optimizer)
+            if getattr(self, "_loaded_optim_state", None) and "inverse_optimizer" in self._loaded_optim_state:
+                self.inverse_optimizer.load_state_dict(self._loaded_optim_state["inverse_optimizer"])
         if self.cfg.training.get("gradient_mode", None) is not None and not self.train_encoder:
             self.encoder_optimizer = None
         else:
@@ -526,6 +576,12 @@ class Trainer:
                      "trainable_parameters": sum(p.numel() for p in group["params"] if p.requires_grad)}
                     for group in optimizer.param_groups
                 ]
+            if self.inverse_head is not None:
+                groups["inverse_optimizer"] = [
+                    {"lr": float(group["lr"]),
+                     "parameters": sum(p.numel() for p in group["params"])}
+                    for group in self.inverse_optimizer.param_groups
+                ]
             protocol = {
                 "mode": str(self.cfg.training.gradient_mode),
                 "seed": int(self.cfg.training.seed),
@@ -581,6 +637,15 @@ class Trainer:
         )
         for epoch in range(init_epoch, final_epoch):
             self.epoch = epoch
+            epoch_started = time.perf_counter()
+            if self.cfg.training.get("research_track", None) is not None and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            if hasattr(self.train_traj_dset, "set_epoch"):
+                self.train_traj_dset.set_epoch(epoch)
+                if self.accelerator.is_main_process:
+                    pair_audit = appearance_counts(self.datasets["train"], epoch)
+                    with open("appearance_pairs_epoch_{}.json".format(epoch), "w") as stream:
+                        json.dump(pair_audit, stream, indent=2)
             if self.accelerator.is_main_process:
                 decoder_active = self.decoder_training_active()
                 log.info(
@@ -594,6 +659,11 @@ class Trainer:
             self.train()
             self.accelerator.wait_for_everyone()
             self.val()
+            if self.cfg.training.get("research_track", None) is not None:
+                self.logs_update({"epoch_wall_seconds": [time.perf_counter() - epoch_started]})
+                if torch.cuda.is_available():
+                    self.logs_update({"peak_gpu_memory_mib":
+                                      [torch.cuda.max_memory_allocated() / (1024 * 1024)]})
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
@@ -659,9 +729,18 @@ class Trainer:
         return logs
 
     def train(self):
+        if self.inverse_head is not None:
+            self.inverse_head.train()
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+            if (self.cfg.training.get("research_track", None) is not None and
+                    self.accelerator.is_main_process and i % 100 == 0):
+                with open("sampling_progress.jsonl", "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"epoch": self.epoch, "batch": i,
+                                             "job_id": os.environ.get("SLURM_JOB_ID"),
+                                             "examples_seen_approx": min(i * self.cfg.gpu_batch_size,
+                                                                         len(self.datasets["train"]))}) + "\n")
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             decoder_active = self.decoder_training_active()
@@ -672,9 +751,30 @@ class Trainer:
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
                 obs, act
             )
+            if self.inverse_head is not None:
+                real_visual = self.model.encode_obs(obs)["visual"]
+                inverse_loss, horizon_losses = self.inverse_head(real_visual, act)
+                loss = loss + float(self.cfg.training.inverse_weight) * inverse_loss
+                loss_components["inverse_loss"] = inverse_loss
+                loss_components["inverse_weighted_loss"] = float(self.cfg.training.inverse_weight) * inverse_loss
+                for horizon, value in horizon_losses.items():
+                    loss_components["inverse_h{}".format(horizon)] = value
+                if i % 100 == 0:
+                    encoder_params = tuple(p for p in self.encoder.parameters() if p.requires_grad)
+                    for name, branch_loss in (("jepa", loss_components["z_loss"]),
+                                              ("inverse", float(self.cfg.training.inverse_weight) * inverse_loss)):
+                        branch_grads = torch.autograd.grad(branch_loss, encoder_params,
+                                                           retain_graph=True, allow_unused=True)
+                        norms = [g.detach().float().norm() for g in branch_grads if g is not None]
+                        loss_components["{}_encoder_grad_norm".format(name)] = (
+                            torch.stack(norms).norm() if norms else loss.new_zeros(())
+                        )
+            loss_components["loss"] = loss
 
             if self.encoder_optimizer is not None:
                 self.encoder_optimizer.zero_grad()
+            if self.inverse_head is not None:
+                self.inverse_optimizer.zero_grad()
             if decoder_active:
                 self.decoder_optimizer.zero_grad()
             if self.cfg.has_predictor:
@@ -693,6 +793,8 @@ class Trainer:
 
             if self.model.train_encoder:
                 self.encoder_optimizer.step()
+            if self.inverse_head is not None:
+                self.inverse_optimizer.step()
             if decoder_active:
                 self.decoder_optimizer.step()
             if self.cfg.has_predictor and self.model.train_predictor:
@@ -802,6 +904,16 @@ class Trainer:
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
                 obs, act
             )
+
+            if self.inverse_head is not None:
+                self.inverse_head.eval()
+                real_visual = self.model.encode_obs(obs)["visual"]
+                inverse_loss, horizon_losses = self.inverse_head(real_visual, act)
+                loss = loss + float(self.cfg.training.inverse_weight) * inverse_loss
+                loss_components["inverse_loss"] = inverse_loss
+                for horizon, value in horizon_losses.items():
+                    loss_components["inverse_h{}".format(horizon)] = value
+                loss_components["loss"] = loss
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
 
