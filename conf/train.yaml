@@ -31,6 +31,7 @@ hydra:
 
 training:
   seed: 0
+  gradient_mode: null  # opt-in: predictor_only or joint; null preserves legacy behavior
   epochs: 20
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1

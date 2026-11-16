@@ -1,0 +1,25 @@
+{
+  "train": {
+    "physical_split": "pusht_noise/train",
+    "block_colors_rgb": {
+      "default": [119, 136, 153],
+      "blue": [0, 61, 153],
+      "green": [0, 107, 60]
+    },
+    "assignment": "One deterministic color per window: (episode_index * 1009 + window_start) modulo 3"
+  },
+  "validation": {
+    "physical_split": "pusht_noise/val",
+    "block_color": "purpleBlock",
+    "block_rgb": [160, 32, 240],
+    "use": "Model selection; excluded from training"
+  },
+  "test": {
+    "physical_split": "pusht_noise/val",
+    "block_color": "redBlock",
+    "block_rgb": [255, 0, 0],
+    "use": "Final unseen-appearance evaluation; excluded from training and model selection"
+  },
+  "trajectory_holdout_between_validation_and_test": false,
+  "note": "The test color is held out, but physical validation and test trajectories are shared. Do not claim an independent trajectory test set."
+}

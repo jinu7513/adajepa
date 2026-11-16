@@ -24,6 +24,7 @@ class VWorldModel(nn.Module):
         num_action_repeat=7,
         num_proprio_repeat=7,
         train_encoder=True,
+        encoder_eval_mode=False,
         train_predictor=False,
         train_decoder=True,
         straighten=False,
@@ -44,6 +45,7 @@ class VWorldModel(nn.Module):
         self.predictor = predictor  # predictor could be None
         self._observed_transition_context = None
         self.train_encoder = train_encoder
+        self.encoder_eval_mode = bool(encoder_eval_mode)
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
         self.num_action_repeat = num_action_repeat
@@ -119,7 +121,7 @@ class VWorldModel(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        self.encoder.train(mode if self.train_encoder else False)
+        self.encoder.train(mode if self.train_encoder and not self.encoder_eval_mode else False)
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
         self.proprio_encoder.train(mode)

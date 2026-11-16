@@ -1,0 +1,17 @@
+# @package _global_
+# Same objective and data as P; the online encoder receives predictive gradients.
+training:
+  gradient_mode: joint
+  stop_grad: true
+  encoder_eval_mode: true
+  straighten: false
+  vcreg: false
+  save_every_x_iterations: 0
+  save_every_x_epoch: 1
+  initial_checkpoint: null
+  save_frozen_encoder: true
+model:
+  train_encoder: true
+  train_predictor: true
+  train_decoder: false
+has_decoder: false

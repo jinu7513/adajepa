@@ -21,8 +21,8 @@ from decord import VideoReader
 from env.pusht.pusht_env import PushTEnv
 
 
-COLORS = {"default": "LightSlateGray", "blue": "#003D99", "green": "#006B3C"}
-HELD_OUT_COLORS = {"redBlock": "Red", "purpleBlock": "Purple"}
+COLORS = {"default": "#778899", "blue": "#003D99", "green": "#006B3C"}
+HELD_OUT_COLORS = {"redBlock": "#FF0000", "purpleBlock": "#A020F0"}
 
 
 def sha256(path):
@@ -154,7 +154,13 @@ def main():
     colors = HELD_OUT_COLORS if args.heldout_only else COLORS
     splits = ("val",) if args.heldout_only else ("train", "val")
     report = {split: run_split(root, split, args.preview_only, args.max_default_mae, colors) for split in splits}
-    payload = {"colors": colors, "preview_only": args.preview_only, "report": report}
+    payload = {
+        "colors": colors,
+        "rgb": {name: list(bytes.fromhex(value[1:])) for name, value in colors.items()},
+        "role": "train_colors" if not args.heldout_only else "heldout_validation_and_test",
+        "preview_only": args.preview_only,
+        "report": report,
+    }
     if not args.preview_only:
         payload["source_hashes"] = {
             f"{split}/{name}": sha256(root / split / name)

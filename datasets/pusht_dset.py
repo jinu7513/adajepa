@@ -185,7 +185,10 @@ def load_pusht_slice_train_val(
     frameskip=0,
     with_velocity=True,
     color_domains=None,
+    validation_color_domain=None,
 ):
+    if validation_color_domain is not None and color_domains is None:
+        raise ValueError("Held-out validation color requires color_domains for training")
     dataset_type = ColorPushTDataset if color_domains is not None else PushTDataset
     color_kwargs = {"color_domains": color_domains} if color_domains is not None else {}
     train_dset = dataset_type(
@@ -196,13 +199,15 @@ def load_pusht_slice_train_val(
         with_velocity=with_velocity,
         **color_kwargs,
     )
-    val_dset = dataset_type(
+    val_type = FixedColorPushTDataset if validation_color_domain is not None else dataset_type
+    val_kwargs = {"color_domain": validation_color_domain} if validation_color_domain is not None else color_kwargs
+    val_dset = val_type(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path + "/val",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
-        **color_kwargs,
+        **val_kwargs,
     )
 
     num_frames = num_hist + num_pred

@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
+        self._validate_gradient_ablation(cfg)
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -190,6 +191,28 @@ class Trainer:
 
         self.epoch_log = OrderedDict()
 
+    @staticmethod
+    def _validate_gradient_ablation(cfg):
+        mode = cfg.training.get("gradient_mode", None)
+        if mode is None:
+            return
+        if mode not in ("predictor_only", "joint"):
+            raise ValueError("training.gradient_mode must be predictor_only or joint")
+        if cfg.model.train_encoder != (mode == "joint"):
+            raise ValueError("training.gradient_mode disagrees with model.train_encoder")
+        if not cfg.training.get("encoder_eval_mode", False):
+            raise ValueError("Gradient ablation requires encoder_eval_mode=true in both modes")
+        if not cfg.model.train_predictor or not cfg.has_predictor:
+            raise ValueError("Gradient ablation requires a trainable predictor")
+        if not cfg.training.stop_grad:
+            raise ValueError("Gradient ablation requires stop_grad=true on future targets")
+        if cfg.has_decoder or cfg.model.train_decoder:
+            raise ValueError("Gradient ablation uses predictive loss without a decoder")
+        if cfg.training.vcreg or cfg.training.straighten:
+            raise ValueError("Gradient ablation does not add regularization losses")
+        if cfg.num_pred != 1:
+            raise ValueError("Current AdaJEPA training supports num_pred=1 only")
+
     def _configure_encoder_trainability(self):
         base_model = getattr(self.encoder, "base_model", None)
         if base_model is not None:
@@ -282,6 +305,10 @@ class Trainer:
             required = {"encoder", "predictor", "action_encoder", "proprio_encoder"}
             if required - source.keys():
                 raise ValueError(f"Initial checkpoint lacks {sorted(required - source.keys())}")
+            if self.cfg.training.get("gradient_mode", None) is not None:
+                absent = [key for key in required if source[key] is None]
+                if absent:
+                    raise ValueError(f"Gradient ablation needs initialized checkpoint modules: {absent}")
             self.encoder = source["encoder"]
             self.action_encoder = source["action_encoder"]
             self.proprio_encoder = source["proprio_encoder"]
@@ -417,6 +444,7 @@ class Trainer:
             num_proprio_repeat=self.cfg.num_proprio_repeat,
             straighten=self.cfg.training.get("straighten", False),
             stop_grad=self.cfg.training.get("stop_grad", True),
+            encoder_eval_mode=self.cfg.training.get("encoder_eval_mode", False),
             vcreg=self.cfg.training.get("vcreg", False),
             vcreg_std_coeff=self.cfg.training.get("vcreg_std_coeff", 0),
             vcreg_cov_coeff=self.cfg.training.get("vcreg_cov_coeff", 0),
@@ -425,17 +453,20 @@ class Trainer:
         self._log_trainable_params(self.model, "model")
 
     def init_optimizers(self):
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr,
-        )
-        self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
-        if getattr(self, "_loaded_optim_state", None) and "encoder_optimizer" in self._loaded_optim_state:
-            try:
-                self.encoder_optimizer.load_state_dict(self._loaded_optim_state["encoder_optimizer"])
-                log.info(f"Loaded encoder optimizer state from checkpoint.")
-            except Exception as e:
-                log.warning(f"Failed to load encoder optimizer state: {e}")
+        if self.cfg.training.get("gradient_mode", None) is not None and not self.train_encoder:
+            self.encoder_optimizer = None
+        else:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr,
+            )
+            self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
+            if getattr(self, "_loaded_optim_state", None) and "encoder_optimizer" in self._loaded_optim_state:
+                try:
+                    self.encoder_optimizer.load_state_dict(self._loaded_optim_state["encoder_optimizer"])
+                    log.info(f"Loaded encoder optimizer state from checkpoint.")
+                except Exception as e:
+                    log.warning(f"Failed to load encoder optimizer state: {e}")
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
@@ -478,6 +509,32 @@ class Trainer:
                     log.info(f"Loaded decoder optimizer state from checkpoint.")
                 except Exception as e:
                     log.warning(f"Failed to load decoder optimizer state: {e}")
+
+        if self.cfg.training.get("gradient_mode", None) is not None and self.accelerator.is_main_process:
+            groups = {}
+            for name in ("encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer"):
+                optimizer = getattr(self, name, None)
+                groups[name] = None if optimizer is None else [
+                    {"lr": float(group["lr"]),
+                     "parameters": sum(p.numel() for p in group["params"]),
+                     "trainable_parameters": sum(p.numel() for p in group["params"] if p.requires_grad)}
+                    for group in optimizer.param_groups
+                ]
+            protocol = {
+                "mode": str(self.cfg.training.gradient_mode),
+                "seed": int(self.cfg.training.seed),
+                "num_hist": int(self.cfg.num_hist),
+                "num_pred": int(self.cfg.num_pred),
+                "frameskip": int(self.cfg.frameskip),
+                "train_windows": len(self.datasets["train"]),
+                "validation_windows": len(self.datasets["valid"]),
+                "train_batches_per_epoch": len(self.dataloaders["train"]),
+                "epochs": int(self.cfg.training.epochs),
+                "optimizer_groups": groups,
+            }
+            with open("optimizer_groups.json", "w", encoding="utf-8") as stream:
+                json.dump(protocol, stream, indent=2)
+            log.info("Gradient-ablation optimizer groups: %s", groups)
 
     def monitor_jobs(self, lock):
         """
@@ -605,7 +662,8 @@ class Trainer:
                 obs, act
             )
 
-            self.encoder_optimizer.zero_grad()
+            if self.encoder_optimizer is not None:
+                self.encoder_optimizer.zero_grad()
             if decoder_active:
                 self.decoder_optimizer.zero_grad()
             if self.cfg.has_predictor:
@@ -613,6 +671,14 @@ class Trainer:
                 self.action_encoder_optimizer.zero_grad()
 
             self.accelerator.backward(loss)
+
+            if self.cfg.training.get("gradient_mode", None) is not None:
+                def gradient_norm(module):
+                    grads = [p.grad.detach().float().norm() for p in module.parameters()
+                             if p.grad is not None]
+                    return torch.stack(grads).norm() if grads else loss.new_zeros(())
+                loss_components["grad_encoder_norm"] = gradient_norm(self.encoder)
+                loss_components["grad_predictor_norm"] = gradient_norm(self.predictor)
 
             if self.model.train_encoder:
                 self.encoder_optimizer.step()
@@ -856,6 +922,33 @@ class Trainer:
                     )  # unsqueeze for batch, (b, t, c, h, w)
 
                 z_obses, z = self.model.rollout(obs_0, actions, known_observed_actions=True)
+                if self.cfg.training.get("gradient_mode", None) is not None:
+                    max_step = min(5, obs["visual"].shape[0] - n_past)
+                    for future_step in range(1, max_step + 1):
+                        frame_index = n_past - 1 + future_step
+                        target_obs = {
+                            key: value[frame_index:frame_index + 1].unsqueeze(0).to(self.device)
+                            for key, value in obs.items()
+                        }
+                        target_visual = self.model.encode_obs(target_obs)["visual"]
+                        predicted_visual = z_obses["visual"][:, frame_index:frame_index + 1]
+                        raw_error = torch.mean((predicted_visual - target_visual) ** 2)
+                        target_power = torch.mean(target_visual ** 2).clamp_min(1e-8)
+                        normalized_error = raw_error / target_power
+                        for key, value in (
+                            (f"z_visual_err_rollout_h{future_step}{postfix}", raw_error),
+                            (f"z_visual_relative_err_rollout_h{future_step}{postfix}", normalized_error),
+                        ):
+                            logs.setdefault(key, []).append(value)
+                        if mode == "val" and self.accelerator.is_main_process:
+                            with open("rollout_horizon.jsonl", "a", encoding="utf-8") as stream:
+                                stream.write(json.dumps({
+                                    "epoch": self.epoch, "trajectory_index": int(traj_idx),
+                                    "start_frame": int(start), "context_frames": int(n_past),
+                                    "future_step": future_step,
+                                    "visual_mse": float(raw_error.item()),
+                                    "visual_relative_mse": float(normalized_error.item()),
+                                }) + "\n")
                 z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
