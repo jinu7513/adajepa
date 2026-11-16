@@ -7,6 +7,7 @@ from torch import nn
 from models.visual_world_model import VWorldModel
 from models.vit import generate_mask_matrix
 from datasets import pusht_dset
+from train import Trainer
 
 
 class VisualEncoder(nn.Module):
@@ -97,3 +98,10 @@ def test_heldout_validation_color_uses_disjoint_video_domain(monkeypatch):
 def test_predictor_attention_is_causal_over_three_frame_slots():
     mask = generate_mask_matrix(npatch=1, nwindow=3)[0, 0]
     assert torch.equal(mask, torch.tril(torch.ones(3, 3)))
+
+
+def test_gradient_resume_uses_total_epoch_budget():
+    assert list(range(1, Trainer._last_epoch_exclusive(0, 3, "joint"))) == [1, 2, 3]
+    assert list(range(3, Trainer._last_epoch_exclusive(2, 3, "joint"))) == [3]
+    assert list(range(4, Trainer._last_epoch_exclusive(3, 3, "joint"))) == []
+    assert list(range(3, Trainer._last_epoch_exclusive(2, 3, None))) == [3, 4, 5]

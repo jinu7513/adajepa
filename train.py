@@ -29,6 +29,12 @@ warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
 class Trainer:
+    @staticmethod
+    def _last_epoch_exclusive(saved_epoch, epoch_budget, gradient_mode):
+        if gradient_mode is not None:
+            return epoch_budget + 1
+        return saved_epoch + epoch_budget + 1
+
     def __init__(self, cfg):
         self.cfg = cfg
         self._validate_gradient_ablation(cfg)
@@ -568,7 +574,12 @@ class Trainer:
             self.monitor_thread.start()
 
         init_epoch = self.epoch + 1  # epoch starts from 1
-        for epoch in range(init_epoch, init_epoch + self.total_epochs):
+        # Gradient ablation treats epochs as a total budget, so a preempted
+        # three-epoch run resumed from epoch 2 executes only epoch 3.
+        final_epoch = self._last_epoch_exclusive(
+            self.epoch, self.total_epochs, self.cfg.training.get("gradient_mode", None)
+        )
+        for epoch in range(init_epoch, final_epoch):
             self.epoch = epoch
             if self.accelerator.is_main_process:
                 decoder_active = self.decoder_training_active()

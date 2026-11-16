@@ -136,6 +136,25 @@ export RUN_DIR="$RUN_ROOT/models/J"
 sbatch --job-name=gradient-J --partition=muma_2021 --qos=preempt_short --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=2-00:00:00 --chdir="$REPO_DIR" --output="$RUN_ROOT/logs/train-J-%j.out" --export=ALL scripts/slurm_gradient_ablation.bash J
 ```
 
+If Slurm preempts a training job, inspect its `model_latest.pth` and epoch
+checkpoints. With at least one complete epoch saved, use `RESUME=1` and the
+**same** `RUN_DIR`, seed, batch size, source checkpoint, and total epoch budget
+when submitting the same script again. The opt-in P/J path then trains only
+the remaining epochs. For example, if P ended after epoch 2 of 3:
+
+```bash
+export RESUME=1
+export SUBMITTED_COMMIT="$(git rev-parse HEAD)"
+export RUN_DIR="$RUN_ROOT/models/P"
+sbatch --job-name=gradient-P-resume --partition=muma_2021 --qos=preempt_short --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=2-00:00:00 --chdir="$REPO_DIR" --output="$RUN_ROOT/logs/train-P-resume-%j.out" --export=ALL scripts/slurm_gradient_ablation.bash P
+```
+
+The resume preflight checks the saved mode, seed, batch size, epoch target,
+source checkpoint path, and paired epoch checkpoint. It leaves the original
+`provenance.txt` intact and records the new commit/job in `resume_history.txt`.
+If no complete checkpoint exists, start a new run directory instead. No MPC
+evaluation should be submitted until the requested final epoch exists.
+
 Wait for both `model_3.pth` files. Evaluate frozen GD MPC on the same target
 file, 50 targets, seed 100, and 30 replans, with no online adaptation:
 
