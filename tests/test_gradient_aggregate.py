@@ -1,6 +1,7 @@
 import json
 
 from scripts.aggregate_gradient_mpc import read_run, wilson_interval
+from scripts.audit_gradient_color_data import color_rgb
 
 
 def test_target_level_mpc_aggregation_keeps_last_cumulative_success(tmp_path):
@@ -20,3 +21,9 @@ def test_target_level_mpc_aggregation_keeps_last_cumulative_success(tmp_path):
     assert last[0]["step"] == 2
     low, high = wilson_interval(1, 2)
     assert low < 50 < high
+
+
+def test_existing_pygame_color_names_match_explicit_rgb():
+    for named, hex_value in (("LightSlateGray", "#778899"),
+                             ("Red", "#FF0000"), ("Purple", "#A020F0")):
+        assert color_rgb(named) == color_rgb(hex_value)

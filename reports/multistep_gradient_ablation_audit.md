@@ -68,6 +68,10 @@ per-color window counts. Color draws are deterministic and approximately
 balanced; the audit records exact counts. The red appearance test reuses
 physical validation trajectories, so it is **not** an independent physical
 test split. Simulator state labels are used only by the frozen-encoder probe.
+Older generated manifests use the Pygame names `LightSlateGray`, `Red`, and
+`Purple`; the audit accepts these only when their RGB values match the explicit
+hex values above. Existing paired videos therefore need not be regenerated
+solely because a color was recorded by name.
 
 ## Implementation and evidence
 

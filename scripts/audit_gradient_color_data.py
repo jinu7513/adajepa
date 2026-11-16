@@ -12,6 +12,25 @@ import torch
 TRAIN_COLORS = ("default", "blue", "green")
 VALIDATION_COLOR = "purpleBlock"
 TEST_COLOR = "redBlock"
+NAMED_RGB = {
+    "lightslategray": (119, 136, 153),
+    "red": (255, 0, 0),
+    "purple": (160, 32, 240),
+}
+
+
+def color_rgb(value):
+    """Normalize colors used by existing Pygame-rendered manifests."""
+    if not isinstance(value, str):
+        raise ValueError("Color must be a string: {!r}".format(value))
+    if value.startswith("#") and len(value) == 7:
+        try:
+            return tuple(bytes.fromhex(value[1:]))
+        except ValueError:
+            pass
+    if value.lower() in NAMED_RGB:
+        return NAMED_RGB[value.lower()]
+    raise ValueError("Unknown manifest color: {!r}".format(value))
 
 
 def sha256(path):
@@ -80,8 +99,15 @@ def main():
         if not path.is_file():
             raise FileNotFoundError(str(path))
         content = json.loads(path.read_text())
-        if content.get("colors") != colors or content.get("preview_only"):
-            raise ValueError("Color manifest does not match the controlled split: {}".format(path))
+        observed = content.get("colors")
+        if not isinstance(observed, dict) or set(observed) != set(colors) or content.get("preview_only"):
+            raise ValueError("Color manifest does not match the controlled split: {} (colors={!r})".format(path, observed))
+        for color, expected in colors.items():
+            if color_rgb(observed[color]) != color_rgb(expected):
+                raise ValueError("Color {} RGB differs in {}: {} vs {}".format(
+                    color, path, observed[color], expected))
+            if "rgb" in content and tuple(content["rgb"][color]) != color_rgb(expected):
+                raise ValueError("RGB metadata differs from rendered color for {} in {}".format(color, path))
         for source, expected_hash in content.get("source_hashes", {}).items():
             if sha256(root / source) != expected_hash:
                 raise ValueError("Source physical trajectory changed after rendering: {}".format(source))
