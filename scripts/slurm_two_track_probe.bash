@@ -15,7 +15,7 @@ python_bin="${PYTHON_BIN:-/home/j/jinwoo/miniforge3/envs/ts/bin/python}"
 cd "$REPO_DIR"
 checkpoint="$OUT_ROOT/$track/models/$arm/checkpoints/model_${TRAIN_EPOCHS:-3}.pth"
 test -f "$checkpoint"
-"$python_bin" scripts/probe_gradient_encoder.py \
+"$python_bin" -m scripts.probe_gradient_encoder \
   --checkpoint "$checkpoint" --data-root "$DATASET_DIR/pusht_noise" \
   --output "$OUT_ROOT/$track/probe/$arm" \
   --train-colors "${train_colors[@]}" --eval-colors "${eval_colors[@]}" \

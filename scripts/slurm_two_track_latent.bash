@@ -12,7 +12,7 @@ python_bin="${PYTHON_BIN:-/home/j/jinwoo/miniforge3/envs/ts/bin/python}"
 cd "$REPO_DIR"
 model_dir="$OUT_ROOT/$track/models/$arm"
 test -f "$model_dir/checkpoints/model_${TRAIN_EPOCHS:-3}.pth"
-"$python_bin" scripts/eval_two_track_latent.py \
+"$python_bin" -m scripts.eval_two_track_latent \
   --model-dir "$model_dir" --data-root "$DATASET_DIR/pusht_noise" \
   --output "$OUT_ROOT/$track/latent/$arm" --epoch "${TRAIN_EPOCHS:-3}" \
   --source-default

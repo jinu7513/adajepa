@@ -37,8 +37,8 @@ The `sinfo` and `sacctmgr` output from this account previously supported `muma_2
 ## Data audit before training
 
 ```bash
-"$PYTHON_BIN" scripts/audit_two_track_data.py --data-root "$DATASET_DIR/pusht_noise" --output "$OUT_ROOT/cross_color_jepa/audit" --track cross_color_jepa --mode cross_window_random --seed 0 --epochs 3 --batch-size 32
-"$PYTHON_BIN" scripts/audit_two_track_data.py --data-root "$DATASET_DIR/pusht_noise" --output "$OUT_ROOT/mi_jepa/audit" --track mi_jepa --seed 0 --epochs 3 --batch-size 32
+"$PYTHON_BIN" -m scripts.audit_two_track_data --data-root "$DATASET_DIR/pusht_noise" --output "$OUT_ROOT/cross_color_jepa/audit" --track cross_color_jepa --mode cross_window_random --seed 0 --epochs 3 --batch-size 32
+"$PYTHON_BIN" -m scripts.audit_two_track_data --data-root "$DATASET_DIR/pusht_noise" --output "$OUT_ROOT/mi_jepa/audit" --track mi_jepa --seed 0 --epochs 3 --batch-size 32
 ```
 
 Check the generated `data_sampling_audit.json`, `data_sampling_audit.md`, and Track A `appearance_pair_counts.json`. Counts in the source report remain pending until these commands run against CIRCE data.
@@ -76,7 +76,7 @@ Run these only after the corresponding final checkpoint exists. Replace `cross_c
 sbatch --job-name=two-track-mpc --partition=muma_2021 --qos=preempt_short --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=2-00:00:00 --chdir="$REPO_DIR" --output="$OUT_ROOT/logs/mpc-A-%j.out" --export=ALL scripts/slurm_two_track_eval.bash cross_color_jepa cross_window_random
 sbatch --job-name=two-track-probe --partition=muma_2021 --qos=preempt_short --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=08:00:00 --chdir="$REPO_DIR" --output="$OUT_ROOT/logs/probe-A-%j.out" --export=ALL scripts/slurm_two_track_probe.bash cross_color_jepa cross_window_random
 sbatch --job-name=two-track-latent --partition=muma_2021 --qos=preempt_short --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=08:00:00 --chdir="$REPO_DIR" --output="$OUT_ROOT/logs/latent-A-%j.out" --export=ALL scripts/slurm_two_track_latent.bash cross_color_jepa cross_window_random
-"$PYTHON_BIN" scripts/aggregate_two_track_mpc.py "$OUT_ROOT"
+"$PYTHON_BIN" -m scripts.aggregate_two_track_mpc "$OUT_ROOT"
 ```
 
 The aggregate writes **separate** `cross_color_jepa/mpc_summary.csv` and `mi_jepa/mpc_summary.csv`, 50-target counts and Wilson 95% intervals. Missing evaluations are shown as `N/A`. The probes write frozen pose/contact transfer and paired cosine metrics; latent evaluation writes teacher-forced and autoregressive horizon errors. These are diagnostic measurements, not substitutes for MPC success. No Track A/B results are claimed until the CIRCE jobs finish.
