@@ -60,7 +60,11 @@ ckpt = torch.load(Path(root) / "checkpoints/model_latest.pth", map_location="cpu
 epoch = int(ckpt["epoch"])
 if not (0 <= epoch <= int(epochs)):
     raise ValueError("Invalid saved epoch")
-print("Resuming {}/{} from epoch {} toward {}".format(track, arm, epoch, epochs), flush=True)
+partial_batch = ckpt.get("partial_batch")
+if partial_batch is not None and (int(partial_batch) < 1 or epoch >= int(epochs) + 1):
+    raise ValueError("Invalid partial epoch checkpoint")
+print("Resuming {}/{} from epoch {}, next batch {}, toward epoch {}".format(
+    track, arm, epoch, partial_batch if partial_batch is not None else 0, epochs), flush=True)
 PY
   printf 'job=%s commit=%s time=%s\n' "$SLURM_JOB_ID" "$(git rev-parse HEAD)" "$(date -Is)" >> "$run_dir/resume_history.txt"
 else

@@ -85,6 +85,7 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+        self._resume_batch = 0
         self.decoder_start_epoch = int(self.cfg.training.get("decoder_start_epoch", 1))
         if self.decoder_start_epoch < 1:
             log.warning(
@@ -276,7 +277,7 @@ class Trainer:
             and self.epoch >= self.decoder_start_epoch
         )
 
-    def save_ckpt(self):
+    def save_ckpt(self, partial_batch=None):
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             if not os.path.exists("checkpoints"):
@@ -291,6 +292,9 @@ class Trainer:
                 else:
                     ckpt[k] = v
             if self.cfg.training.get("research_track", None) is not None:
+                ckpt["partial_batch"] = partial_batch
+                if partial_batch is not None:
+                    ckpt["partial_epoch_log"] = self.epoch_log
                 ckpt["rng_state"] = {
                     "python": random.getstate(),
                     "numpy": np.random.get_state(),
@@ -303,8 +307,9 @@ class Trainer:
             epoch_tmp = epoch_path.with_suffix(".pth.tmp")
             torch.save(ckpt, latest_tmp)
             os.replace(latest_tmp, latest_path)
-            torch.save(ckpt, epoch_tmp)
-            os.replace(epoch_tmp, epoch_path)
+            if partial_batch is None:
+                torch.save(ckpt, epoch_tmp)
+                os.replace(epoch_tmp, epoch_path)
             log.info("Saved model to {}".format(os.getcwd()))
             ckpt_path = os.path.join(os.getcwd(), f"checkpoints/model_{self.epoch}.pth")
         else:
@@ -325,6 +330,10 @@ class Trainer:
                 torch.set_rng_state(v["torch"])
                 if v["cuda"] is not None and torch.cuda.is_available():
                     torch.cuda.set_rng_state_all(v["cuda"])
+            elif k == "partial_batch":
+                self._resume_batch = int(v) if v is not None else 0
+            elif k == "partial_epoch_log":
+                self.epoch_log = v
             else:
                 self.__dict__[k] = v
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
@@ -629,7 +638,7 @@ class Trainer:
             )
             self.monitor_thread.start()
 
-        init_epoch = self.epoch + 1  # epoch starts from 1
+        init_epoch = self.epoch if self._resume_batch else self.epoch + 1
         # Gradient ablation treats epochs as a total budget, so a preempted
         # three-epoch run resumed from epoch 2 executes only epoch 3.
         final_epoch = self._last_epoch_exclusive(
@@ -734,6 +743,8 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+            if i < self._resume_batch:
+                continue
             if (self.cfg.training.get("research_track", None) is not None and
                     self.accelerator.is_main_process and i % 100 == 0):
                 with open("sampling_progress.jsonl", "a", encoding="utf-8") as stream:
@@ -868,12 +879,20 @@ class Trainer:
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
-            if (
-                self.cfg.training.save_every_x_iterations > 0
-                and i % self.cfg.training.save_every_x_iterations == 0
-            ):
+            interval = self.cfg.training.save_every_x_iterations
+            if interval > 0:
+                save_iteration = ((i + 1) % interval == 0 if
+                                  self.cfg.training.get("research_track", None) is not None else
+                                  i % interval == 0)
+            else:
+                save_iteration = False
+            if save_iteration:
                 self.logs_flash_iter(iteration=i)
-                self.save_ckpt()
+                if self.cfg.training.get("research_track", None) is not None:
+                    self.save_ckpt(partial_batch=i + 1)
+                else:
+                    self.save_ckpt()
+        self._resume_batch = 0
 
     @torch.no_grad()
     def val(self):

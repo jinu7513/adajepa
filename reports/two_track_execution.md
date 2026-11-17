@@ -8,7 +8,7 @@ This branch is `two-track-jepa`. It leaves the existing P/J experiments and thei
 - Four observed frames per window, `num_hist=3`, `num_pred=1`, raw `frameskip=5`; three teacher-forced one-step latent targets.
 - Same physical training windows and three completed epochs per arm; seed 0, batch 32, encoder and predictor trainable, encoder held in eval mode.
 - Evaluation: Frozen GD, 50 paired PushT targets, seed 100, 30 MPC steps, default, purpleBlock, redBlock. Online adaptation is disabled.
-- Actual physical-window and appearance counts are written by the real loader. A preempted partial epoch is replayed on epoch-level resume, and `sampling_progress.jsonl` records the extent of replay.
+- Actual physical-window and appearance counts are written by the real loader. Track A/B save a partial checkpoint every 2,000 completed training batches. Resumption restarts the same epoch at the next batch; the loader still reads and skips preceding batches, so resumption may spend time on video I/O. Batches after the latest checkpoint are replayed. `sampling_progress.jsonl` records this extent.
 
 ## One-time setup on CIRCE
 
@@ -54,7 +54,7 @@ sbatch --job-name=two-track-B --partition=muma_2021 --qos=preempt_short --gres=g
 
 For controls, repeat the exact command with the arm and log basename changed to `same_window_random`, `same_fixed`, `cross_fixed`, or `default_jepa_baseline`. Avoid submitting all jobs at once if the account reaches `QOSMaxSubmitJobPerUserLimit`.
 
-Each arm writes `hydra.yaml`, `provenance.txt`, `sampling_progress.jsonl`, `data_sampling_audit.json`, epoch metrics and `checkpoints/model_1.pth` through `model_3.pth` in `$OUT_ROOT/<track>/models/<arm>`. Confirm a completed `model_3.pth` before evaluation.
+Each arm writes `hydra.yaml`, `provenance.txt`, `sampling_progress.jsonl`, `data_sampling_audit.json`, epoch metrics and `checkpoints/model_1.pth` through `model_3.pth` in `$OUT_ROOT/<track>/models/<arm>`. Partial progress is in `checkpoints/model_latest.pth` with `partial_batch`; `model_N.pth` is written only after epoch N completes. Confirm a completed `model_3.pth` before evaluation.
 
 ## Monitor and resume
 
@@ -66,7 +66,7 @@ ls -lh "$OUT_ROOT/cross_color_jepa/models/cross_window_random/checkpoints/"
 scancel JOB_ID
 ```
 
-After preemption, rerun the same `sbatch` command with `RESUME=1` exported in the submitting shell. The job checks the saved arm, seed, batch and epoch budget before loading its last completed epoch. The interrupted epoch restarts from its beginning; compare `sampling_progress.jsonl` and attempt logs to report any extra window visits.
+After preemption, rerun the same `sbatch` command with `RESUME=1` exported in the submitting shell. The job checks the saved arm, seed, batch and epoch budget before loading the latest checkpoint. It skips already checkpointed batches within the interrupted epoch. Batches after that checkpoint repeat; compare `sampling_progress.jsonl` and attempt logs to report any extra window visits.
 
 ## Evaluate and aggregate
 

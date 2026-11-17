@@ -11,6 +11,7 @@ from datasets.pusht_dset import ColorPairPushTDataset, PushTDataset
 from models.inverse_action import InverseActionHead
 from models.visual_world_model import VWorldModel
 from torch import nn
+from train import Trainer
 
 
 @pytest.mark.parametrize("mode", ("same_fixed", "same_window_random", "cross_fixed", "cross_window_random"))
@@ -176,3 +177,31 @@ def test_cross_color_target_is_stop_gradient_but_input_encoder_updates():
     assert input_visual.grad[:, :3].abs().sum() > 0
     assert target_visual.grad is None or target_visual.grad.abs().sum() == 0
     assert input_visual.grad[:, 3].abs().sum() == 0
+
+
+def test_partial_epoch_checkpoint_resumes_same_epoch_without_publishing_full_epoch(tmp_path, monkeypatch):
+    class SingleProcess:
+        is_main_process = True
+
+        def wait_for_everyone(self):
+            pass
+
+    monkeypatch.chdir(tmp_path)
+    first = Trainer.__new__(Trainer)
+    first.accelerator = SingleProcess()
+    first.cfg = OmegaConf.create({"saved_folder": str(tmp_path),
+                                  "training": {"research_track": "cross_color_jepa"}})
+    first._keys_to_save = ["epoch"]
+    first.epoch = 1
+    first.epoch_log = {"train_loss": (2000, 123.0)}
+    first.save_ckpt(partial_batch=2000)
+    assert (tmp_path / "checkpoints/model_latest.pth").is_file()
+    assert not (tmp_path / "checkpoints/model_1.pth").exists()
+
+    resumed = Trainer.__new__(Trainer)
+    resumed._keys_to_save = ["epoch"]
+    resumed._resume_batch = 0
+    resumed.load_ckpt(tmp_path / "checkpoints/model_latest.pth")
+    assert (resumed.epoch, resumed._resume_batch) == (1, 2000)
+    assert resumed.epoch_log == first.epoch_log
+    assert (resumed.epoch if resumed._resume_batch else resumed.epoch + 1) == 1
